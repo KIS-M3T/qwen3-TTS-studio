@@ -43,24 +43,28 @@ In conformità rigorosa all'incarico di Milestone M0 e alle correzioni vincolant
 
 ---
 
-## 2. Tabella dei Compromessi tra i Motori Candidati
+## 2. Tabella Comparativa dei Motori Candidati
 
 | Criterio | `Qwen3-TTS-12Hz-1.7B-Base` | `Qwen3-TTS-12Hz-0.6B-Base` | `Chatterbox Multilingual V3` |
 | :--- | :--- | :--- | :--- |
-| **Qualità Fonetica e Naturalezza** | **Eccellente** (modello da 1.7B parametri, timbro ricco, ottima resa dell'italiano con prompt reference). | **Buona** (leggermente meno espressivo nelle sfumature emotive, ma chiaro). | **Discreta/Media** (intonazione talvolta robotica o con accento anglofono residuo). |
-| **In-Context Voice Cloning** | **Sì** (zero-shot/few-shot con speaker embedding pesato). | **Sì** (zero-shot, ma minore aderenza timbrica rispetto al 1.7B). | **Sì** (richiede riferimento acustico pulito). |
-| **Latenza & Throughput (RTF)** | RTF stimato ~0.25–0.40 su RTX 4080 (veloce). | RTF stimato ~0.10–0.18 su RTX 4080 (**ultraveloce**). | RTF stimato ~0.20–0.30. |
-| **Occupazione VRAM (Inferenza)** | ~3.4 – 3.8 GB (entra comodamente nei 12 GB). | ~1.3 – 1.6 GB (impatto minimo sui 12 GB). | ~1.5 – 2.0 GB. |
-| **Fattibilità Fine-Tuning su 12 GB** | **Solo con LoRA/QLoRA** (SFT full-parameter richiede >20 GB VRAM). | **Fattibile** (anche con full SFT con batch=1 e gradient accumulation). | Non prevista pipeline SFT standard per l'italiano. |
-| **Licenza & Manutenzione** | **Apache-2.0** (Attivamente mantenuto da Alibaba). | **Apache-2.0** (Attivamente mantenuto da Alibaba). | **MIT** (Progetto **abbandonato/retired** da agosto 2026). |
+| **Architettura & Parametri** | Autoregressivo 12Hz (~1.7B) | Autoregressivo 12Hz (~0.6B) | Conformer / Flow-matching (~0.5B) |
+| **Qualità Fonetica Italiana** | Non ancora misurata empiricamente (richiede pesi) | Non ancora misurata empiricamente (richiede pesi) | Non ancora misurata empiricamente (richiede pesi) |
+| **In-Context Voice Cloning** | Supportato da architettura base | Supportato da architettura base | Supportato da architettura base |
+| **Latenza & Throughput (RTF)** | Non ancora misurato empiricamente su laptop | Non ancora misurato empiricamente su laptop | Non ancora misurato empiricamente su laptop |
+| **Occupazione VRAM (Inferenza)** | Non ancora misurata empiricamente su laptop | Non ancora misurata empiricamente su laptop | Non ancora misurata empiricamente su laptop |
+| **Fattibilità Fine-Tuning 12 GB** | Richiede LoRA / QLoRA (Full SFT stimato >20 GB) | Teoricamente possibile batch=1 (da provare in M5) | Non documentata per italiano |
+| **Licenza Software & Pesi** | **Apache-2.0** (Attivamente mantenuto) | **Apache-2.0** (Attivamente mantenuto) | **MIT** (Progetto **ritirato da agosto 2026**) |
+| **Compatibilità Dipendenze** | Compatibile con baseline (`transformers 4.x`) | Compatibile con baseline (`transformers 4.x`) | **Conflitto bloccante** (`transformers 5.2.0`, `gradio 6.8.0`) |
 
 ### Scelta Motivata del Primo Motore
 * **Motore di Riferimento Principale per M1–M4: `Qwen3-TTS-12Hz-1.7B-Base`**:  
   Rappresenta il miglior compromesso assoluto tra fedeltà vocale italiana, supporto nativo della lingua e licenza d'uso commerciale permissiva (Apache-2.0). I 12 GB di VRAM della GPU del laptop consentono un'inferenza fluida in `bfloat16` con ampio margine per cache e pre-processing.
 * **Motore Secondario / Baseline Leggera: `Qwen3-TTS-12Hz-0.6B-Base`**:  
   Viene mantenuto nell'architettura come alternativa a bassissima latenza e come primo candidato per validare la procedura di addestramento e fine-tuning nella successiva Milestone M5.
-* **Chatterbox V3**:  
-  Confermato esclusivamente come backend secondario isolabile di confronto, non come dipendenza strategica, a causa del suo stato di manutenzione cessato.
+* **Chatterbox V3 (Verifica Tecnica Empirica)**:  
+  - Il tentativo di installazione via PyPI (`pip install chatterbox`) fallisce perché il pacchetto ufficiale si chiama `chatterbox-tts` su GitHub (`resemble-ai/chatterbox`).
+  - Installando `chatterbox-tts`, emerge un conflitto di dipendenze insanabile con la baseline: `chatterbox-tts 0.1.7` impone rigidamente `transformers==5.2.0` e `gradio==6.8.0`, mentre `qwen-tts 0.1.1` impone `transformers==4.57.3` e `qwen3-TTS-studio` impone `gradio<5.0`.
+  - La coesistenza dei due motori nello stesso ambiente Python genera collisioni bloccanti (`ERROR: chatterbox-tts requires transformers==5.2.0, but you have transformers 4.57.3 which is incompatible`). Questo dimostra tecnicamente e in modo riproducibile perché Chatterbox debba rimanere un backend isolato in ambiente virtuale separato e non possa essere fuso con il runtime di Qwen3-TTS.
 
 ---
 
