@@ -93,3 +93,6 @@ test_artifacts/
 
 # Docker smoke test output
 _docker_smoke_out/
+
+cv-corpus*
+

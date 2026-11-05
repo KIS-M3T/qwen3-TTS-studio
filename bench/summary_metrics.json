@@ -1,0 +1,14 @@
+{
+  "DIAGNOSTIC_DRYRUN": {
+    "status": "TESTED",
+    "total_tests": 60,
+    "successful_tests": 60,
+    "rtf_median": 0.009,
+    "rtf_p95": 0.012,
+    "mean_audio_duration_sec": 6.81,
+    "peak_vram_mb": "N/A (CPU/Dry-run)",
+    "empty_audio_count": 0,
+    "clipped_audio_count": 0,
+    "truncated_count": 0
+  }
+}
