@@ -17,11 +17,17 @@ files_to_bundle = [
     "scripts/hardware_probe.py",
     "scripts/hardware_info.json",
     "scripts/prepare_reference_voices.py",
+    "scripts/download_models.py",
+    "scripts/download_pytorch_wheels.py",
+    "scripts/audit_quality_sentinel.py",
+    "scripts/export_m0_bundle.py",
     "bench/manifest.csv",
     "bench/test_dataset.jsonl",
     "bench/run_benchmark.py",
     "bench/results_benchmark.csv",
     "bench/summary_metrics.json",
+    "bench/QUALITY_AUDIT_REPORT.md",
+    "bench/sentinel_quality_audit.json",
     "bench/reference_voices/VOICE_DATASHEET.md",
 ]
 

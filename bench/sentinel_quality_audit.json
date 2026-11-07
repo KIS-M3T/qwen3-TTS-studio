@@ -1,0 +1,154 @@
+[
+  {
+    "id": "LEN_01",
+    "category": "length_boundary_edge_cases",
+    "ground_truth": "Sì.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 0.88,
+        "asr_transcript": "Sì.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 0.8,
+        "asr_transcript": "Sì!",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "LEN_02",
+    "category": "length_boundary_edge_cases",
+    "ground_truth": "No, grazie.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 1.84,
+        "asr_transcript": "Noo, grazie!",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 1.92,
+        "asr_transcript": "No, grazie.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "LEN_03",
+    "category": "length_boundary_edge_cases",
+    "ground_truth": "Certamente, arrivo subito!",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 2.72,
+        "asr_transcript": "Certo a mente a riposciuto.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 3.44,
+        "asr_transcript": "Certamente, arrivo subito.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "NAR_01",
+    "category": "narrative_dialogues",
+    "ground_truth": "«Dove pensi di andare a quest'ora?», gli chiese Marta con voce tremante.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 5.12,
+        "asr_transcript": "Dove pensi che andare a costora, e che esimata con un ciotremante.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 5.04,
+        "asr_transcript": "dove pensi di andare a costora e chiesa morta con un ciotromolto.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "ACR_01",
+    "category": "acronyms_abbreviations_names",
+    "ground_truth": "Il Dott. Rossi e l'Avv. Bianchi hanno presentato ricorso al TAR del Lazio.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 6.0,
+        "asr_transcript": "il metto resci e lagno, gli anchi hanno presentato l'interno, oltarbe le mezzo.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 6.48,
+        "asr_transcript": "il decresci e la visi, vi anche ha presentato il cos'antar de l'azio.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "HOM_01",
+    "category": "homographs_accents_phonetics",
+    "ground_truth": "I prìncipi della dinastia condividevano i medesimi princìpi morali.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 4.8,
+        "asr_transcript": "E preuncipi della di nastia, condividero al medesso e preuncipi morali.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 4.48,
+        "asr_transcript": "e principe di radina stia condividivare mette insieme e principe in modale.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "NUM_01",
+    "category": "numbers_currencies_dates",
+    "ground_truth": "L'11/05/1998 alle ore 14:30 il PIL è salito del 2,5% a fronte di 1.500.000 €.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 10.88,
+        "asr_transcript": "In questo tempo, prima che ha potato all'ora di poterci stranta il piano e salica di un po' avvolverlo, c'è un copercinto, a salica di un po' avvolverlo, c'è un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un copercinto, a salica di un cop",
+        "has_repetition_loop": true,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 12.4,
+        "asr_transcript": "E' non di scienze rosti, con il nuovo cellore intero, con l'ore, con il gittere interpino. E' salito da buo, con scienco per scento affronte di ognomenci o cento niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto niracinto n",
+        "has_repetition_loop": true,
+        "is_hallucination": false
+      }
+    }
+  },
+  {
+    "id": "TEC_01",
+    "category": "technical_code_switching",
+    "ground_truth": "Per avviare il container Docker, eseguire il comando docker compose up -d sulla porta 8080.",
+    "models": {
+      "M-QWEN-1.7B": {
+        "duration_sec": 8.24,
+        "asr_transcript": "per avviare il contenere doppere, eseguire il pomande doppere con pesi a 10 minuti a un minuttante.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      },
+      "M-QWEN-0.6B": {
+        "duration_sec": 7.68,
+        "asr_transcript": "per agli contenere bocca, eseguere con un bocca, con pezzi atte di sceporta e c'è che c'è quattra.",
+        "has_repetition_loop": false,
+        "is_hallucination": false
+      }
+    }
+  }
+]

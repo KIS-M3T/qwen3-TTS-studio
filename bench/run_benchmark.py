@@ -221,10 +221,9 @@ class ChatterboxRunner(BaseModelRunner):
 
     def load(self) -> bool:
         self.load_error = (
-            "Chatterbox Multilingual V3 e' incompatibile con il runtime di produzione: "
-            "richiede transformers 5.2.0 e gradio 6.8.0, in conflitto diretto con qwen-tts "
-            "(transformers 4.57.3). Il repository upstream ResembleAI/chatterbox e' ritirato "
-            "(retired research) da agosto 2026."
+            "Chatterbox Multilingual V3 richiede transformers 5.2.0 e gradio 6.8.0, "
+            "in conflitto diretto nello stesso ambiente Python con qwen-tts (transformers 4.57.3). "
+            "Benchmark non eseguibile in questo runtime; test differito ad ambiente virtuale isolato."
         )
         self.loaded = False
         return False
@@ -352,6 +351,7 @@ def run_benchmark(
                     "test_id": test_id,
                     "category": item["category"],
                     "model_id": runner.model_id,
+                    "run_type": "CACHE_RECOVERY",
                     "status": "SUCCESS",
                     "error_message": "",
                     "gen_time_sec": round(gen_time, 3),
@@ -377,7 +377,8 @@ def run_benchmark(
                     "test_id": item["id"],
                     "category": item["category"],
                     "model_id": runner.model_id,
-                    "status": "UNAVAILABLE",
+                    "run_type": "DEFERRED_SEPARATE_VENV",
+                    "status": "NON_TESTATO_DIFFERITO",
                     "error_message": runner.load_error,
                     "gen_time_sec": None,
                     "duration_sec": None,
@@ -409,6 +410,7 @@ def run_benchmark(
                     "test_id": test_id,
                     "category": item["category"],
                     "model_id": runner.model_id,
+                    "run_type": "CACHE_RECOVERY",
                     "status": "SUCCESS",
                     "error_message": "",
                     "gen_time_sec": round(gen_time, 3),
@@ -440,6 +442,7 @@ def run_benchmark(
                     "test_id": test_id,
                     "category": item["category"],
                     "model_id": runner.model_id,
+                    "run_type": "REAL_INFERENCE",
                     "status": "SUCCESS",
                     "error_message": "",
                     "gen_time_sec": round(gen_time, 3),
@@ -459,6 +462,7 @@ def run_benchmark(
                     "test_id": test_id,
                     "category": item["category"],
                     "model_id": runner.model_id,
+                    "run_type": "REAL_INFERENCE",
                     "status": "ERROR",
                     "error_message": str(e),
                     "gen_time_sec": None,
@@ -478,7 +482,7 @@ def run_benchmark(
     # Write results CSV
     with open(results_csv, "w", encoding="utf-8", newline="") as f:
         fieldnames = [
-            "test_id", "category", "model_id", "status", "error_message",
+            "test_id", "category", "model_id", "run_type", "status", "error_message",
             "gen_time_sec", "duration_sec", "rtf", "peak_vram_mb",
             "peak_dbfs", "rms_dbfs", "is_empty", "is_clipped", "is_truncated", "wav_path"
         ]
@@ -494,7 +498,8 @@ def run_benchmark(
 
         if not success_res:
             summary[runner_id] = {
-                "status": "UNAVAILABLE",
+                "status": "NON_TESTATO_DIFFERITO",
+                "classification": "NON TESTATO",
                 "total_tests": len(model_res),
                 "successful_tests": 0,
                 "reason": model_res[0]["error_message"] if model_res else "No data",
@@ -506,13 +511,15 @@ def run_benchmark(
         vrams = [r["peak_vram_mb"] for r in success_res if r["peak_vram_mb"] is not None]
 
         summary[runner_id] = {
-            "status": "TESTED",
+            "status": "MISURATO_EMPIRICO",
+            "classification": "MISURATO",
             "total_tests": len(model_res),
             "successful_tests": len(success_res),
+            "rtf_definition": "tempo_generazione_s / durata_audio_s (RTF > 1.0 indica piu lento del tempo reale)",
             "rtf_median": round(float(np.median(rtfs)), 3) if rtfs else None,
             "rtf_p95": round(float(np.percentile(rtfs, 95)), 3) if rtfs else None,
             "mean_audio_duration_sec": round(float(np.mean(durs)), 2) if durs else None,
-            "peak_vram_mb": round(float(np.max(vrams)), 2) if vrams and max(vrams) > 0 else "N/A (CPU/Dry-run)",
+            "peak_vram_mb": round(float(np.max(vrams)), 2) if vrams and max(vrams) > 0 else "N/A",
             "empty_audio_count": sum(1 for r in success_res if r["is_empty"]),
             "clipped_audio_count": sum(1 for r in success_res if r["is_clipped"]),
             "truncated_count": sum(1 for r in success_res if r["is_truncated"]),

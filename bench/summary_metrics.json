@@ -1,20 +1,31 @@
 {
   "M-QWEN-0.6B": {
-    "status": "TESTED",
+    "status": "MISURATO_EMPIRICO",
+    "classification": "MISURATO",
     "total_tests": 60,
     "successful_tests": 60,
-    "rtf_median": 2.5,
-    "rtf_p95": 4.078,
+    "rtf_definition": "tempo_generazione_s / durata_audio_s (RTF > 1.0 indica piu lento del tempo reale)",
+    "rtf_median": 4.047,
+    "rtf_p95": 4.663,
     "mean_audio_duration_sec": 8.67,
-    "peak_vram_mb": 2820.25,
+    "peak_vram_mb": 2622.95,
     "empty_audio_count": 0,
     "clipped_audio_count": 0,
     "truncated_count": 0
   },
+  "M-CHAT-0.5B": {
+    "status": "NON_TESTATO_DIFFERITO",
+    "classification": "NON TESTATO",
+    "total_tests": 60,
+    "successful_tests": 0,
+    "reason": "Chatterbox Multilingual V3 richiede transformers 5.2.0 e gradio 6.8.0, in conflitto diretto nello stesso ambiente Python con qwen-tts (transformers 4.57.3). Benchmark non eseguibile in questo runtime; test differito ad ambiente virtuale isolato."
+  },
   "M-QWEN-1.7B": {
-    "status": "TESTED",
+    "status": "MISURATO_EMPIRICO",
+    "classification": "MISURATO",
     "total_tests": 60,
     "successful_tests": 60,
+    "rtf_definition": "tempo_generazione_s / durata_audio_s (RTF > 1.0 indica piu lento del tempo reale)",
     "rtf_median": 3.248,
     "rtf_p95": 4.568,
     "mean_audio_duration_sec": 8.25,
@@ -22,11 +33,5 @@
     "empty_audio_count": 0,
     "clipped_audio_count": 0,
     "truncated_count": 0
-  },
-  "M-CHAT-0.5B": {
-    "status": "UNAVAILABLE",
-    "total_tests": 60,
-    "successful_tests": 0,
-    "reason": "Chatterbox Multilingual V3 e' incompatibile con il runtime di produzione: richiede transformers 5.2.0 e gradio 6.8.0, in conflitto diretto con qwen-tts (transformers 4.57.3). Il repository upstream ResembleAI/chatterbox e' ritirato (retired research) da agosto 2026."
   }
 }
