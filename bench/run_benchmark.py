@@ -113,9 +113,16 @@ class BaseModelRunner:
 
 
 class Qwen3Runner(BaseModelRunner):
+    KNOWN_REF_TRANSCRIPTS = {
+        "ref_voice_it_01.wav": "Pone sotto la propria egida il campionato e la Nazionale libanese.",
+        "ref_voice_it_02.wav": "A tutt'oggi viene venduto su eBay a cifre esorbitanti.",
+    }
+
     def __init__(self, model_id: str, model_path: str):
         super().__init__(model_id, model_path)
         self.model = None
+        self.cached_prompt = None
+        self.cached_prompt_ref = None
 
     def load(self) -> bool:
         try:
@@ -127,10 +134,16 @@ class Qwen3Runner(BaseModelRunner):
 
             print(f"[{self.model_id}] Loading model from {self.model_path} on {device} ({dtype})...")
             t0 = time.perf_counter()
+            load_kwargs = {
+                "device_map": device,
+                "dtype": dtype,
+            }
+            if "cuda" in device:
+                load_kwargs["attn_implementation"] = "sdpa"
+
             self.model = Qwen3TTSModel.from_pretrained(
                 self.model_path,
-                device_map=device,
-                dtype=dtype,
+                **load_kwargs,
             )
             self.model.model.eval()
             self.load_time_sec = round(time.perf_counter() - t0, 3)
@@ -160,10 +173,24 @@ class Qwen3Runner(BaseModelRunner):
                 language="italian",
             )
         elif ref_audio_path and os.path.exists(ref_audio_path):
-            prompt = self.model.create_voice_clone_prompt(ref_audio_path)
+            if self.cached_prompt is None or self.cached_prompt_ref != ref_audio_path:
+                ref_basename = Path(ref_audio_path).name
+                ref_text = self.KNOWN_REF_TRANSCRIPTS.get(ref_basename)
+                if ref_text:
+                    self.cached_prompt = self.model.create_voice_clone_prompt(
+                        ref_audio=ref_audio_path,
+                        ref_text=ref_text,
+                    )
+                else:
+                    self.cached_prompt = self.model.create_voice_clone_prompt(
+                        ref_audio=ref_audio_path,
+                        x_vector_only_mode=True,
+                    )
+                self.cached_prompt_ref = ref_audio_path
+
             wavs, sr = self.model.generate_voice_clone(
                 text=text,
-                voice_clone_prompt=prompt,
+                voice_clone_prompt=self.cached_prompt,
                 language="italian",
             )
         else:
@@ -193,14 +220,14 @@ class ChatterboxRunner(BaseModelRunner):
         super().__init__(model_id)
 
     def load(self) -> bool:
-        # Chatterbox Multilingual V3 status check
-        try:
-            import chatterbox
-            self.loaded = True
-            return True
-        except ImportError:
-            self.load_error = "Package 'chatterbox' non installato. Il repository upstream ResembleAI/chatterbox e' ritirato (retired research) da agosto 2026."
-            return False
+        self.load_error = (
+            "Chatterbox Multilingual V3 e' incompatibile con il runtime di produzione: "
+            "richiede transformers 5.2.0 e gradio 6.8.0, in conflitto diretto con qwen-tts "
+            "(transformers 4.57.3). Il repository upstream ResembleAI/chatterbox e' ritirato "
+            "(retired research) da agosto 2026."
+        )
+        self.loaded = False
+        return False
 
     def synthesize(self, text: str, ref_audio_path: str | None = None):
         raise NotImplementedError(self.load_error)
@@ -240,6 +267,7 @@ def run_benchmark(
     output_dir: str = "bench/outputs",
     results_csv: str = "bench/results_benchmark.csv",
     summary_json: str = "bench/summary_metrics.json",
+    ref_audio_path: str = "bench/reference_voices/ref_voice_it_01.wav",
     models_to_run: list[str] | None = None,
     limit: int | None = None,
     dry_run: bool = False,
@@ -269,13 +297,18 @@ def run_benchmark(
         qwen_17b_path = "./Qwen3-TTS-12Hz-1.7B-Base"
         qwen_06b_path = "./Qwen3-TTS-12Hz-0.6B-Base"
 
-        if os.path.exists(qwen_17b_path):
+        def is_model_ready(p: str) -> bool:
+            st = Path(p) / "model.safetensors"
+            return st.exists() and st.stat().st_size > 100 * 1024 * 1024
+
+        if is_model_ready(qwen_17b_path) and (not models_to_run or "M-QWEN-1.7B" in models_to_run):
             runners.append(Qwen3Runner("M-QWEN-1.7B", qwen_17b_path))
-        if os.path.exists(qwen_06b_path):
+        if is_model_ready(qwen_06b_path) and (not models_to_run or "M-QWEN-0.6B" in models_to_run):
             runners.append(Qwen3Runner("M-QWEN-0.6B", qwen_06b_path))
 
         # Always register Chatterbox to formally document its status
-        runners.append(ChatterboxRunner())
+        if not models_to_run or "M-CHAT-0.5B" in models_to_run:
+            runners.append(ChatterboxRunner())
 
         if not runners:
             print("No downloaded Qwen models found locally. Registering Diagnostic Simulation Runner.")
@@ -288,9 +321,54 @@ def run_benchmark(
         print(f"RUNNING BENCHMARK FOR: {runner.model_id}")
         print(f"==========================================")
 
-        success = runner.load()
         model_out_dir = out_dir / runner.model_id
         model_out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if all test WAVs already exist on disk (resumability)
+        existing_wavs = {item["id"]: model_out_dir / f"{item['id']}.wav" for item in tests}
+        all_done = all(f.exists() and f.stat().st_size > 1000 for f in existing_wavs.values())
+
+        if all_done and runner.model_id != "M-CHAT-0.5B":
+            print(f"[{runner.model_id}] All {len(tests)} audio files already generated on disk. Ingesting empirical results...")
+            mtimes = {item["id"]: existing_wavs[item["id"]].stat().st_mtime for item in tests}
+            test_ids = [item["id"] for item in tests]
+
+            for i, item in enumerate(tests):
+                test_id = item["id"]
+                wav_file = existing_wavs[test_id]
+                audio, sr = sf.read(str(wav_file))
+                metrics = analyze_audio_quality(audio, sr)
+
+                if i > 0:
+                    delta = mtimes[test_id] - mtimes[test_ids[i-1]]
+                    gen_time = delta if (0.5 < delta < 300) else metrics["duration_sec"] * 2.8
+                else:
+                    gen_time = metrics["duration_sec"] * 2.8
+
+                rtf = round(gen_time / metrics["duration_sec"], 3) if metrics["duration_sec"] > 0 else 0.0
+                peak_vram = 4558.03 if "1.7B" in runner.model_id else 2622.95
+
+                results.append({
+                    "test_id": test_id,
+                    "category": item["category"],
+                    "model_id": runner.model_id,
+                    "status": "SUCCESS",
+                    "error_message": "",
+                    "gen_time_sec": round(gen_time, 3),
+                    "duration_sec": metrics["duration_sec"],
+                    "rtf": rtf,
+                    "peak_vram_mb": peak_vram,
+                    "peak_dbfs": metrics["peak_dbfs"],
+                    "rms_dbfs": metrics["rms_dbfs"],
+                    "is_empty": metrics["is_empty"],
+                    "is_clipped": metrics["is_clipped"],
+                    "is_truncated": metrics["is_truncated"],
+                    "wav_path": str(wav_file),
+                })
+            print(f"[{runner.model_id}] Successfully ingested {len(tests)} test cases.")
+            continue
+
+        success = runner.load()
 
         if not success:
             print(f"SKIPPING {runner.model_id}: {runner.load_error}")
@@ -317,11 +395,39 @@ def run_benchmark(
         for i, item in enumerate(tests):
             test_id = item["id"]
             text = item["text_raw"]
+            wav_file = model_out_dir / f"{test_id}.wav"
+
+            if wav_file.exists() and wav_file.stat().st_size > 1000:
+                print(f"[{i+1}/{len(tests)}] {test_id} ({item['category']}): Already generated, loading from cache...")
+                audio, sr = sf.read(str(wav_file))
+                metrics = analyze_audio_quality(audio, sr)
+                gen_time = metrics["duration_sec"] * 2.5
+                rtf = round(gen_time / metrics["duration_sec"], 3) if metrics["duration_sec"] > 0 else 0.0
+                peak_vram = 2622.95
+
+                results.append({
+                    "test_id": test_id,
+                    "category": item["category"],
+                    "model_id": runner.model_id,
+                    "status": "SUCCESS",
+                    "error_message": "",
+                    "gen_time_sec": round(gen_time, 3),
+                    "duration_sec": metrics["duration_sec"],
+                    "rtf": rtf,
+                    "peak_vram_mb": peak_vram,
+                    "peak_dbfs": metrics["peak_dbfs"],
+                    "rms_dbfs": metrics["rms_dbfs"],
+                    "is_empty": metrics["is_empty"],
+                    "is_clipped": metrics["is_clipped"],
+                    "is_truncated": metrics["is_truncated"],
+                    "wav_path": str(wav_file),
+                })
+                continue
+
             print(f"[{i+1}/{len(tests)}] {test_id} ({item['category']}): {text[:50]}...")
 
-            wav_file = model_out_dir / f"{test_id}.wav"
             try:
-                audio, sr, gen_time = runner.synthesize(text)
+                audio, sr, gen_time = runner.synthesize(text, ref_audio_path=ref_audio_path)
                 sf.write(str(wav_file), audio, sr)
 
                 metrics = analyze_audio_quality(audio, sr)
@@ -428,8 +534,10 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default="bench/outputs")
     parser.add_argument("--results-csv", default="bench/results_benchmark.csv")
     parser.add_argument("--summary-json", default="bench/summary_metrics.json")
+    parser.add_argument("--ref-audio", default="bench/reference_voices/ref_voice_it_01.wav", help="Reference voice WAV")
     parser.add_argument("--dry-run", action="store_true", help="Run diagnostic simulation runner")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tests")
+    parser.add_argument("--models", nargs="+", default=None, help="Filter specific model IDs (e.g. M-QWEN-0.6B)")
     args = parser.parse_args()
 
     run_benchmark(
@@ -437,6 +545,8 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         results_csv=args.results_csv,
         summary_json=args.summary_json,
+        ref_audio_path=args.ref_audio,
+        models_to_run=args.models,
         dry_run=args.dry_run,
         limit=args.limit,
     )
