@@ -5,6 +5,7 @@
 > **Data:** 8 Novembre 2026 (Revisione Gate 3)  
 > **Commit Baseline Tag:** `89a5dc91d2fba1593ca66de43c6986ff1a0c5999` (`baseline-v0.1.7-kism3t`)  
 > **Branch Remoto GitHub Ufficiale:** [`m0-audit-benchmark`](https://github.com/KIS-M3T/qwen3-TTS-studio/tree/m0-audit-benchmark)  
+> **HEAD Effettivo Verificato (Remote Commit SHA):** `a73d13134d48e31d2948a4e14b722adc79cfe996`  
 > **Link Creazione Pull Request:** [`.../pull/new/m0-audit-benchmark`](https://github.com/KIS-M3T/qwen3-TTS-studio/pull/new/m0-audit-benchmark) (apertura riservata al Product Owner)  
 > **Pacchetto Evidenze Completo:** [`m0_deliverables.zip`](file:///c:/Users/occhi/Desktop/CASA/PERSONALE/PROJECT/ITA_TTS/m0_deliverables.zip) (5.80 MB, include campioni WAV neurali)
 
