@@ -1,24 +1,24 @@
 {
   "os": {
     "system": "Windows",
-    "release": "10",
+    "release": "11",
     "version": "10.0.26200",
     "machine": "AMD64",
     "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel"
   },
   "python": {
-    "version": "3.10.11",
-    "executable": "C:\\Users\\occhi\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
+    "version": "3.12.10",
+    "executable": "C:\\Users\\occhi\\Desktop\\CASA\\PERSONALE\\PROJECT\\ITA_TTS\\.venv\\Scripts\\python.exe"
   },
   "system_ram": {
     "total_gb": 31.73,
-    "available_gb": 6.18
+    "available_gb": 3.72
   },
   "disk": {
     "drive_path": "C:\\Users\\occhi\\Desktop\\CASA\\PERSONALE\\PROJECT\\ITA_TTS",
     "total_gb": 951.65,
-    "used_gb": 855.82,
-    "free_gb": 95.82
+    "used_gb": 874.51,
+    "free_gb": 77.13
   },
   "gpus": [
     {
@@ -28,19 +28,21 @@
       "memory_free_mb": 11997.0,
       "memory_used_mb": 0.0,
       "driver_version": "576.57",
-      "pstate": "P0",
-      "temp_c": 49.0
+      "pstate": "P8",
+      "temp_c": 65.0
     }
   ],
   "cuda_version_detected": "12.9, V12.9.86",
   "torch": {
     "installed": true,
-    "version": "2.11.0+cpu",
-    "cuda_available": false,
-    "cuda_version": null,
-    "device_count": 0,
-    "device_names": [],
-    "bf16_supported": false,
-    "fp16_supported": false
+    "version": "2.6.0+cu124",
+    "cuda_available": true,
+    "cuda_version": "12.4",
+    "device_count": 1,
+    "device_names": [
+      "NVIDIA GeForce RTX 4080 Laptop GPU"
+    ],
+    "bf16_supported": true,
+    "fp16_supported": true
   }
 }

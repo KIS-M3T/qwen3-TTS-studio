@@ -1,37 +1,97 @@
 {
-  "M-QWEN-0.6B": {
-    "status": "MISURATO_EMPIRICO",
+  "M-QWEN-1.7B": {
+    "status": "MISURATO_EMPIRICO_SU_CAMPIONE_CONTROLLATO",
     "classification": "MISURATO",
-    "total_tests": 60,
-    "successful_tests": 60,
-    "rtf_definition": "tempo_generazione_s / durata_audio_s (RTF > 1.0 indica piu lento del tempo reale)",
-    "rtf_median": 4.047,
-    "rtf_p95": 4.663,
-    "mean_audio_duration_sec": 8.67,
-    "peak_vram_mb": 2622.95,
-    "empty_audio_count": 0,
-    "clipped_audio_count": 0,
-    "truncated_count": 0
+    "acoustic_corpus": {
+      "total_cases": 60,
+      "successful_audio_files": 60,
+      "measured_cases": 10,
+      "cached_unmeasured_cases": 50,
+      "mean_audio_duration_sec": 8.27,
+      "empty_audio_count": 0,
+      "clipped_audio_count": 0,
+      "trailing_silence_gt_2s_count": 0
+    },
+    "empirical_benchmark": {
+      "test_ids": [
+        "ACR_01",
+        "HOM_01",
+        "LEN_01",
+        "LEN_02",
+        "LEN_03",
+        "LEN_04",
+        "LEN_05",
+        "NAR_01",
+        "NUM_01",
+        "TEC_01"
+      ],
+      "total_measured_runs": 20,
+      "iterations_per_test": 2,
+      "warmup_excluded": true,
+      "timing_method": "time.perf_counter monotonic",
+      "rtf_definition": "gen_time_sec / duration_sec (RTF > 1.0 indica piu lento del tempo reale)",
+      "rtf_median": 4.718,
+      "rtf_mean": 4.66,
+      "rtf_min": 2.716,
+      "rtf_max": 5.18,
+      "rtf_p95": 5.12,
+      "rtf_std": 0.502,
+      "gen_time_median_sec": 26.279,
+      "gen_time_mean_sec": 40.215,
+      "peak_vram_allocated_mb": 4756.05,
+      "peak_vram_reserved_mb": 5472.0,
+      "nvidia_smi_used_mb": 5708.0
+    }
+  },
+  "M-QWEN-0.6B": {
+    "status": "MISURATO_EMPIRICO_SU_CAMPIONE_CONTROLLATO",
+    "classification": "MISURATO",
+    "acoustic_corpus": {
+      "total_cases": 60,
+      "successful_audio_files": 60,
+      "measured_cases": 10,
+      "cached_unmeasured_cases": 50,
+      "mean_audio_duration_sec": 8.7,
+      "empty_audio_count": 0,
+      "clipped_audio_count": 0,
+      "trailing_silence_gt_2s_count": 0
+    },
+    "empirical_benchmark": {
+      "test_ids": [
+        "ACR_01",
+        "HOM_01",
+        "LEN_01",
+        "LEN_02",
+        "LEN_03",
+        "LEN_04",
+        "LEN_05",
+        "NAR_01",
+        "NUM_01",
+        "TEC_01"
+      ],
+      "total_measured_runs": 20,
+      "iterations_per_test": 2,
+      "warmup_excluded": true,
+      "timing_method": "time.perf_counter monotonic",
+      "rtf_definition": "gen_time_sec / duration_sec (RTF > 1.0 indica piu lento del tempo reale)",
+      "rtf_median": 4.944,
+      "rtf_mean": 5.973,
+      "rtf_min": 3.436,
+      "rtf_max": 10.735,
+      "rtf_p95": 10.668,
+      "rtf_std": 2.137,
+      "gen_time_median_sec": 35.965,
+      "gen_time_mean_sec": 56.446,
+      "peak_vram_allocated_mb": 2821.69,
+      "peak_vram_reserved_mb": 3666.0,
+      "nvidia_smi_used_mb": 3902.0
+    }
   },
   "M-CHAT-0.5B": {
     "status": "NON_TESTATO_DIFFERITO",
-    "classification": "NON TESTATO",
+    "classification": "NON TESTATO (ambiente separato differito)",
     "total_tests": 60,
     "successful_tests": 0,
     "reason": "Chatterbox Multilingual V3 richiede transformers 5.2.0 e gradio 6.8.0, in conflitto diretto nello stesso ambiente Python con qwen-tts (transformers 4.57.3). Benchmark non eseguibile in questo runtime; test differito ad ambiente virtuale isolato."
-  },
-  "M-QWEN-1.7B": {
-    "status": "MISURATO_EMPIRICO",
-    "classification": "MISURATO",
-    "total_tests": 60,
-    "successful_tests": 60,
-    "rtf_definition": "tempo_generazione_s / durata_audio_s (RTF > 1.0 indica piu lento del tempo reale)",
-    "rtf_median": 3.248,
-    "rtf_p95": 4.568,
-    "mean_audio_duration_sec": 8.25,
-    "peak_vram_mb": 4558.03,
-    "empty_audio_count": 0,
-    "clipped_audio_count": 0,
-    "truncated_count": 0
   }
 }

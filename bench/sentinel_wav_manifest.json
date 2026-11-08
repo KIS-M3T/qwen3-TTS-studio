@@ -1,0 +1,166 @@
+{
+  "M-QWEN-1.7B": {
+    "NUM_01": {
+      "file": "NUM_01.wav",
+      "size_bytes": 541484,
+      "sha256": "bb140db309ede79e2f18c0132823f3dcb271d51d668a32beb97385259aa3a219",
+      "dur_sec": 11.28,
+      "sample_peak_dbfs": -2.68,
+      "rms_dbfs": -21.2
+    },
+    "ACR_01": {
+      "file": "ACR_01.wav",
+      "size_bytes": 284204,
+      "sha256": "4bbe86bb72570eae92f2f4ab52c37b68505593816f49626b3270c380e3c9d4bb",
+      "dur_sec": 5.92,
+      "sample_peak_dbfs": -0.21,
+      "rms_dbfs": -19.24
+    },
+    "HOM_01": {
+      "file": "HOM_01.wav",
+      "size_bytes": 265004,
+      "sha256": "a095823acdd3835a09274657f46e4c70f7155e371a95dea4416ead0f8009f458",
+      "dur_sec": 5.52,
+      "sample_peak_dbfs": -2.19,
+      "rms_dbfs": -20.43
+    },
+    "TEC_01": {
+      "file": "TEC_01.wav",
+      "size_bytes": 387884,
+      "sha256": "772662ea50dcee27dbd2e8786fd1cc15bf7e92f6e7f7119fed13d64d87c7c52a",
+      "dur_sec": 8.08,
+      "sample_peak_dbfs": -2.54,
+      "rms_dbfs": -19.77
+    },
+    "NAR_01": {
+      "file": "NAR_01.wav",
+      "size_bytes": 268844,
+      "sha256": "1eca641e414b67671207a23915a19b98a4af89095b3004980aa94bb68e4a97c1",
+      "dur_sec": 5.6,
+      "sample_peak_dbfs": -1.48,
+      "rms_dbfs": -19.92
+    },
+    "LEN_01": {
+      "file": "LEN_01.wav",
+      "size_bytes": 53804,
+      "sha256": "374b9f633e8c5d5436062bd14d8e84e7c22034dfb7adced208e71f6e2157e734",
+      "dur_sec": 1.12,
+      "sample_peak_dbfs": -3.06,
+      "rms_dbfs": -24.2
+    },
+    "LEN_02": {
+      "file": "LEN_02.wav",
+      "size_bytes": 65324,
+      "sha256": "302e24acf8395a9019a11e2c66b1f748777af42d5a39f03130c2fa4d34625570",
+      "dur_sec": 1.36,
+      "sample_peak_dbfs": -1.12,
+      "rms_dbfs": -21.63
+    },
+    "LEN_03": {
+      "file": "LEN_03.wav",
+      "size_bytes": 130604,
+      "sha256": "fe77c8df43c7d7bb76a8e235ceb86d73abf1156eb1b767f89d346ad9279f0509",
+      "dur_sec": 2.72,
+      "sample_peak_dbfs": -2.19,
+      "rms_dbfs": -21.36
+    },
+    "LEN_04": {
+      "file": "LEN_04.wav",
+      "size_bytes": 967724,
+      "sha256": "601dccb7027365ab4c5440335c1f316b86454f9f560a1e52e5f5a84f472f8c48",
+      "dur_sec": 20.16,
+      "sample_peak_dbfs": -0.35,
+      "rms_dbfs": -21.29
+    },
+    "LEN_05": {
+      "file": "LEN_05.wav",
+      "size_bytes": 1082924,
+      "sha256": "076c8c0e4eb324b206b9ac23071fe66004388a73cfe7829e6103078db0dcd2b8",
+      "dur_sec": 22.56,
+      "sample_peak_dbfs": -1.24,
+      "rms_dbfs": -20.52
+    }
+  },
+  "M-QWEN-0.6B": {
+    "NUM_01": {
+      "file": "NUM_01.wav",
+      "size_bytes": 595244,
+      "sha256": "1e90f5892d632d719073352e03f57d5b2ede7038a6949eb24901222cea143dbd",
+      "dur_sec": 12.4,
+      "sample_peak_dbfs": -1.6,
+      "rms_dbfs": -21.08
+    },
+    "ACR_01": {
+      "file": "ACR_01.wav",
+      "size_bytes": 295724,
+      "sha256": "e6e23e0dbb0bb8d5a1c7b1d0a3ee4491ffea12d2a3df7329b0763b9eb06e8189",
+      "dur_sec": 6.16,
+      "sample_peak_dbfs": -2.96,
+      "rms_dbfs": -20.98
+    },
+    "HOM_01": {
+      "file": "HOM_01.wav",
+      "size_bytes": 253484,
+      "sha256": "7f07110750deebf446810f85af2f4eaf01bbf2c3d921beff93803bf7d656e087",
+      "dur_sec": 5.28,
+      "sample_peak_dbfs": -3.25,
+      "rms_dbfs": -22.98
+    },
+    "TEC_01": {
+      "file": "TEC_01.wav",
+      "size_bytes": 437804,
+      "sha256": "e3572f931be8c404415b47757a38ba0e63f253a0fa69bf7551cfafa8f69d71ed",
+      "dur_sec": 9.12,
+      "sample_peak_dbfs": -0.86,
+      "rms_dbfs": -19.29
+    },
+    "NAR_01": {
+      "file": "NAR_01.wav",
+      "size_bytes": 261164,
+      "sha256": "c251a8af4d55f9f73643a0a1fd31fa6ce04ee62f91abf5167a95bf2886304eda",
+      "dur_sec": 5.44,
+      "sample_peak_dbfs": -1.8,
+      "rms_dbfs": -20.92
+    },
+    "LEN_01": {
+      "file": "LEN_01.wav",
+      "size_bytes": 53804,
+      "sha256": "c915752cb75d13c035a74dc289bf7a88669e38758afdc5a33878af01cd25f859",
+      "dur_sec": 1.12,
+      "sample_peak_dbfs": -8.66,
+      "rms_dbfs": -29.65
+    },
+    "LEN_02": {
+      "file": "LEN_02.wav",
+      "size_bytes": 96044,
+      "sha256": "b6ac320ba20b876e9706746edbe5bd5dbf405498a09e7b7408307164c5dc3081",
+      "dur_sec": 2.0,
+      "sample_peak_dbfs": -4.36,
+      "rms_dbfs": -27.42
+    },
+    "LEN_03": {
+      "file": "LEN_03.wav",
+      "size_bytes": 111404,
+      "sha256": "068875bb1df3ec9faba910f2d0b3205bf87f77d2cc6eb44071fe38fea860d655",
+      "dur_sec": 2.32,
+      "sample_peak_dbfs": -3.5,
+      "rms_dbfs": -23.16
+    },
+    "LEN_04": {
+      "file": "LEN_04.wav",
+      "size_bytes": 933164,
+      "sha256": "990d3167b785f09bd4b0b3dfd9c7ff19c9ef3312f5f8fe80668168261e43bd65",
+      "dur_sec": 19.44,
+      "sample_peak_dbfs": -2.73,
+      "rms_dbfs": -21.03
+    },
+    "LEN_05": {
+      "file": "LEN_05.wav",
+      "size_bytes": 1082924,
+      "sha256": "6567e512e987bae9cdc06ce8cbf0d5641621e458cace1fa36475b319369991ee",
+      "dur_sec": 22.56,
+      "sample_peak_dbfs": -1.52,
+      "rms_dbfs": -21.53
+    }
+  }
+}
