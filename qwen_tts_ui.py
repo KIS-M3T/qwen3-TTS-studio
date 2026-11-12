@@ -1861,10 +1861,9 @@ def clone_voice_multi(
             gen_time = time.time() - start_time
             audio_info = ""
 
-        prompt_temp = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
-        cpu_prompt = _prompt_to_cpu(voice_clone_prompt)
-        with open(prompt_temp.name, "wb") as f:
-            pickle.dump(cpu_prompt, f)
+        prompt_temp = tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False)
+        from src.engine.prompt_manager import save_prompt_to_safetensors_file
+        save_prompt_to_safetensors_file(voice_clone_prompt, Path(prompt_temp.name))
 
         samples_meta = [
             {
@@ -2038,22 +2037,20 @@ def save_cloned_voice_multi(
         return "Clone a voice first before saving", gr.update()
 
     try:
-        safe_name = "".join(c for c in voice_name if c.isalnum() or c in "_-").strip()
-        if not safe_name or safe_name in (".", ".."):
-            gr.Warning(
-                "Invalid voice name - use only letters, numbers, underscores, hyphens"
-            )
-            return "Invalid voice name", gr.update()
-
-        voice_dir = (SAVED_VOICES_DIR / safe_name).resolve()
+        from src.engine.prompt_manager import validate_voice_name, validate_voice_directory
         try:
-            voice_dir.relative_to(SAVED_VOICES_DIR.resolve())
-        except ValueError:
-            gr.Warning("Invalid voice name")
-            return "Invalid voice name", gr.update()
+            safe_name = validate_voice_name(voice_name)
+            voice_dir = validate_voice_directory(SAVED_VOICES_DIR / safe_name, SAVED_VOICES_DIR)
+        except Exception as val_e:
+            gr.Warning(str(val_e))
+            return str(val_e), gr.update()
 
-        voice_dir.mkdir(exist_ok=True)
-        shutil.copy(prompt_path, voice_dir / "prompt.pkl")
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        # G2: Save non-executable safetensors
+        if prompt_path.endswith(".safetensors"):
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
+        else:
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
 
         try:
             transcripts = json.loads(transcripts_json) if transcripts_json else {}
@@ -2143,25 +2140,20 @@ def save_cloned_voice(
         return "Clone a voice first before saving", gr.update()
 
     try:
-        # Strict sanitization: only alphanumeric, underscore, hyphen
-        safe_name = "".join(c for c in voice_name if c.isalnum() or c in "_-").strip()
-        if not safe_name or safe_name in (".", ".."):
-            gr.Warning(
-                "Invalid voice name - use only letters, numbers, underscores, hyphens"
-            )
-            return "Invalid voice name", gr.update()
-
-        voice_dir = (SAVED_VOICES_DIR / safe_name).resolve()
-        # Ensure we're still within SAVED_VOICES_DIR (proper path containment check)
+        from src.engine.prompt_manager import validate_voice_name, validate_voice_directory
         try:
-            voice_dir.relative_to(SAVED_VOICES_DIR.resolve())
-        except ValueError:
-            gr.Warning("Invalid voice name")
-            return "Invalid voice name", gr.update()
+            safe_name = validate_voice_name(voice_name)
+            voice_dir = validate_voice_directory(SAVED_VOICES_DIR / safe_name, SAVED_VOICES_DIR)
+        except Exception as val_e:
+            gr.Warning(str(val_e))
+            return str(val_e), gr.update()
 
-        voice_dir.mkdir(exist_ok=True)
+        voice_dir.mkdir(parents=True, exist_ok=True)
 
-        shutil.copy(prompt_path, voice_dir / "prompt.pkl")
+        if prompt_path.endswith(".safetensors"):
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
+        else:
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
 
         if ref_audio and isinstance(ref_audio, str):
             shutil.copy(ref_audio, voice_dir / "ref_audio.wav")
@@ -2255,21 +2247,11 @@ def generate_with_saved_voice(
 
         progress(0.05, desc="Loading voice profile...")
 
-        if safetensors_path.exists():
-            from safetensors.torch import load_file
-            voice_clone_prompt = load_file(str(safetensors_path))
-        elif prompt_path.exists():
-            if os.environ.get("ALLOW_LEGACY_PICKLE", "0") == "1":
-                with open(prompt_path, "rb") as f:
-                    voice_clone_prompt = pickle.load(f)
-            else:
-                raise gr.Error(
-                    f"Legacy pickle prompt for '{saved_voice_id}' is blocked by default for security (F1). "
-                    "Migrate to non-executable safetensors using 'python scripts/migrate_legacy_prompts.py' "
-                    "or launch with ALLOW_LEGACY_PICKLE=1."
-                )
-        else:
-            raise gr.Error(f"Voice not found: {saved_voice_id}")
+        from src.engine.prompt_manager import load_voice_prompt_items
+        try:
+            voice_clone_prompt = load_voice_prompt_items(voice_dir)
+        except Exception as load_err:
+            raise gr.Error(f"Failed to load voice '{saved_voice_id}': {load_err}")
 
         # Optionally disable ICL at generation time for cross-lingual output.
         runtime_prompt = voice_clone_prompt

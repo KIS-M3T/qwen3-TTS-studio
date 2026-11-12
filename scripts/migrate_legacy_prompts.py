@@ -51,25 +51,43 @@ def migrate_voice_directory(
         voice_dir / "source.wav",
     ]
     existing_ref = next((p for p in ref_audio_candidates if p.exists()), None)
+    ref_audios_dir = voice_dir / "ref_audios"
+    multi_refs = sorted(ref_audios_dir.glob("*.wav")) if ref_audios_dir.exists() else []
 
-    if existing_ref and reconstruct_with_model and model_adapter:
-        logger.info(f"[{voice_dir.name}] Source audio found at {existing_ref.name}. Reconstructing prompt cleanly...")
-        transcript = None
+    if (existing_ref or multi_refs) and reconstruct_with_model and model_adapter:
+        logger.info(f"[{voice_dir.name}] Source audio found ({len(multi_refs) if multi_refs else 1} sample(s)). Reconstructing cleanly...")
+        transcripts = None
         if meta_path.exists():
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta_data = json.load(mf)
-                transcript = meta_data.get("ref_text")
+                transcripts = meta_data.get("transcripts") or meta_data.get("ref_text")
 
-        vp = model_adapter.create_voice_prompt(str(existing_ref), ref_transcript=transcript)
-        from src.engine.prompt_manager import save_voice_prompt
+        from src.engine.prompt_manager import save_voice_prompt_items
 
-        save_voice_prompt(
-            voice_id=voice_dir.name,
-            prompt_payload=vp.raw_prompt_payload,
-            ref_audio_path=existing_ref,
-            ref_transcript=transcript,
-            base_dir=voice_dir.parent,
-        )
+        if multi_refs:
+            audio_paths = [str(p) for p in multi_refs]
+            t_list = transcripts if isinstance(transcripts, list) else None
+            prompt_items = model_adapter.model.create_voice_clone_prompt(
+                ref_audio=audio_paths,
+                ref_text=t_list,
+            )
+            save_voice_prompt_items(
+                items=prompt_items,
+                voice_id=voice_dir.name,
+                base_dir=voice_dir.parent,
+                ref_audio_paths=[str(p.relative_to(voice_dir)) for p in multi_refs],
+            )
+        else:
+            prompt_items = model_adapter.model.create_voice_clone_prompt(
+                ref_audio=str(existing_ref),
+                ref_text=transcripts if isinstance(transcripts, str) else None,
+            )
+            save_voice_prompt_items(
+                items=prompt_items,
+                voice_id=voice_dir.name,
+                base_dir=voice_dir.parent,
+                ref_audio_paths=[str(existing_ref.relative_to(voice_dir))],
+            )
         logger.info(f"[{voice_dir.name}] Successfully reconstructed from audio into safetensors!")
         return True
 
