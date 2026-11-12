@@ -243,8 +243,20 @@ class Qwen3EngineAdapter(BaseTTSEngine):
                     language=language,
                 )
             else:
-                wavs, sr = self.model.generate(
+                # Base zero-shot synthesis: use default technical reference voice prompt
+                if self.cached_prompt is None:
+                    default_ref = Path("bench/reference_voices/ref_voice_it_01.wav")
+                    ref_text = KNOWN_REF_TRANSCRIPTS.get(default_ref.name)
+                    if default_ref.exists():
+                        self.cached_prompt = self.model.create_voice_clone_prompt(
+                            ref_audio=str(default_ref),
+                            ref_text=ref_text,
+                        )
+                    else:
+                        raise RuntimeError(f"Reference voice audio required for Base model {self.model_id}.")
+                wavs, sr = self.model.generate_voice_clone(
                     text=text,
+                    voice_clone_prompt=self.cached_prompt,
                     language=language,
                 )
 
