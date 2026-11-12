@@ -1,4 +1,4 @@
-"""Unit tests for acoustic metrics and trailing silence detection (B7)."""
+"""Unit tests for acoustic metrics, dynamic range, DC offset, and trailing silence detection (B7, G6)."""
 
 import numpy as np
 import pytest
@@ -13,6 +13,29 @@ def test_analyze_acoustic_quality_clean():
     assert metrics["duration_sec"] == 1.0
     assert metrics["is_clipped"] is False
     assert metrics["peak_dbfs"] < 0.0
+    assert abs(metrics["dc_offset"]) < 0.001
+    assert "crest_factor_db" in metrics
+    assert "dynamic_range_db" in metrics
+
+
+def test_analyze_acoustic_quality_dc_offset_and_crest_factor():
+    """G6: Verify DC offset and crest factor are calculated accurately and distinguished."""
+    # 1. Sine wave with explicit +0.1 DC bias
+    pure_sine = np.sin(2 * np.pi * 440 * np.linspace(0, 1, 24000)).astype(np.float32) * 0.4
+    offset_sine = pure_sine + 0.1
+    metrics_offset = analyze_acoustic_quality(offset_sine, 24000)
+    assert round(metrics_offset["dc_offset"], 2) == 0.10
+
+    # 2. Modulated signal (active audio followed by quieter region)
+    active = np.sin(2 * np.pi * 440 * np.linspace(0, 0.5, 12000)).astype(np.float32) * 0.8
+    quiet = np.sin(2 * np.pi * 440 * np.linspace(0, 0.5, 12000)).astype(np.float32) * 0.05
+    varying_audio = np.concatenate([active, quiet])
+
+    metrics_varying = analyze_acoustic_quality(varying_audio, 24000)
+    assert metrics_varying["crest_factor_db"] > 0.0
+    # On non-stationary audio, crest factor (peak/overall RMS) and dynamic range (peak/noise floor) are clearly distinct
+    assert metrics_varying["crest_factor_db"] != metrics_varying["dynamic_range_db"]
+    assert metrics_varying["dynamic_range_db"] > metrics_varying["crest_factor_db"]
 
 
 def test_analyze_acoustic_quality_clipped():

@@ -1,18 +1,18 @@
 {
   "session_id": "m1_smoke_test_verify",
-  "generated_at_utc": "2026-11-12T15:01:53.874836+00:00",
-  "total_events": 2,
+  "generated_at_utc": "2026-11-12T15:46:27.954738+00:00",
+  "total_events": 4,
   "models": {
     "0.6B-Base": {
-      "total_runs": 2,
-      "measured_runs": 1,
-      "warmup_runs": 1,
+      "total_runs": 4,
+      "measured_runs": 2,
+      "warmup_runs": 2,
       "error_runs": 0,
-      "rtf_median": 2.2629,
+      "rtf_median": 2.275,
       "rtf_min": 2.2629,
-      "rtf_max": 2.2629,
-      "inference_time_mean_sec": 9.0516,
-      "max_peak_vram_mb": 2397.64
+      "rtf_max": 2.287,
+      "inference_time_mean_sec": 9.5573,
+      "max_peak_vram_mb": 2409.88
     }
   }
 }

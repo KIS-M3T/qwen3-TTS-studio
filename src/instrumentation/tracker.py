@@ -1,8 +1,9 @@
-"""Benchmark session runner, per-run event schema validation, and reporting (R1, R2, C3, C4)."""
+"""Benchmark session tracker with per-run disaggregation, atomic JSON/CSV generation, and mathematical median (WP1, R3, G4)."""
 
 from datetime import datetime, timezone
-import hashlib
+import logging
 from pathlib import Path
+import statistics
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -15,12 +16,15 @@ from src.instrumentation.persistence import (
     write_atomic_json,
 )
 
+logger = logging.getLogger(__name__)
 
 PER_RUN_CSV_FIELDNAMES = [
     "session_id",
     "run_id",
     "model_id",
-    "model_sha256",
+    "checkpoint_revision",
+    "config_sha256",
+    "weights_sha256",
     "test_case_id",
     "iteration_index",
     "run_type",
@@ -30,6 +34,7 @@ PER_RUN_CSV_FIELDNAMES = [
     "temperature",
     "top_p",
     "top_k",
+    "repetition_penalty",
     "min_new_tokens",
     "max_new_tokens",
     "input_text_raw",
@@ -50,21 +55,28 @@ PER_RUN_CSV_FIELDNAMES = [
 
 
 class BenchmarkSession:
-    """Manages an isolated benchmark session with atomic logging and zero historical overwrite."""
+    """Manages an isolated benchmark session with atomic logging and zero historical overwrite (WP1, G4)."""
 
     def __init__(self, session_id: Optional[str] = None, base_dir: Optional[Path] = None):
-        now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        self.session_id = session_id or f"m1_{now_str}_{uuid.uuid4().hex[:6]}"
-        self.base_dir = Path(base_dir) if base_dir else Path("bench/sessions")
-        self.session_dir = self.base_dir / self.session_id
+        if session_id:
+            self.session_id = session_id
+        else:
+            now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            self.session_id = f"session_{now_str}_{uuid.uuid4().hex[:6]}"
+
+        root_bench = base_dir or Path("bench/sessions")
+        self.session_dir = root_bench / self.session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
+
+        self.wav_dir = self.session_dir / "wav_samples"
+        self.wav_dir.mkdir(exist_ok=True)
 
         self.events_file = self.session_dir / "benchmark_events.jsonl"
         self.csv_file = self.session_dir / "results_benchmark.csv"
         self.summary_file = self.session_dir / "summary_metrics.json"
         self.manifest_file = self.session_dir / "environment_manifest.json"
 
-        # Initialize and save environment manifest once per session
+        # Write canonical environment manifest upon initialization
         self.manifest = get_environment_manifest()
         write_atomic_json(self.manifest_file, self.manifest)
 
@@ -73,28 +85,33 @@ class BenchmarkSession:
         model_id: str,
         test_case_id: str,
         iteration_index: int,
-        input_text_raw: str,
-        run_type: str = "measured",  # "warmup" or "measured"
-        status: str = "success",     # "success", "error", "deferred"
+        input_text_raw: str = "",
+        run_type: str = "measured",            # "warmup" or "measured"
+        status: str = "success",              # "success" or "error"
         measured: bool = True,
-        seed: Optional[int] = 42,
-        temperature: float = 0.7,
-        top_p: float = 0.8,
-        top_k: int = 20,
-        min_new_tokens: int = 60,
-        max_new_tokens: int = 2048,
-        subtalker_params: Optional[Dict[str, Any]] = None,
         audio_duration_sec: Optional[float] = None,
         inference_time_sec: Optional[float] = None,
+        seed: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        min_new_tokens: Optional[int] = None,
+        max_new_tokens: Optional[int] = None,
+        subtalker_params: Optional[Dict[str, Any]] = None,
+        applied_params: Optional[Dict[str, Any]] = None,
         prep_time_sec: Optional[float] = None,
         save_time_sec: Optional[float] = None,
         memory_snapshot: Optional[Dict[str, Any]] = None,
+        baseline_process_mb: Optional[float] = None,
         wav_path: Optional[str] = None,
         wav_sha256: Optional[str] = None,
-        model_sha256: Optional[str] = None,
+        checkpoint_revision: Optional[str] = None,
+        config_sha256: Optional[str] = None,
+        weights_sha256: Optional[str] = None,
         error_message: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Validate and append a single per-run record."""
+        """Validate and append a single per-run record with complete metadata (G4)."""
         run_id = f"{self.session_id}_{model_id}_{test_case_id}_iter{iteration_index}"
 
         # Calculate RTF only if empirically measured and duration > 0
@@ -104,11 +121,16 @@ class BenchmarkSession:
 
         mem = memory_snapshot or get_memory_snapshot()
 
+        # If baseline_process_mb is not provided, use snapshot if present, else None (null in JSON)
+        proc_baseline = baseline_process_mb if baseline_process_mb is not None else mem.get("baseline_process_mb")
+
         event: Dict[str, Any] = {
             "session_id": self.session_id,
             "run_id": run_id,
             "model_id": model_id,
-            "model_sha256": model_sha256 or "unknown",
+            "checkpoint_revision": checkpoint_revision or "unknown",
+            "config_sha256": config_sha256,
+            "weights_sha256": weights_sha256,
             "test_case_id": test_case_id,
             "iteration_index": iteration_index,
             "run_type": run_type,
@@ -118,9 +140,11 @@ class BenchmarkSession:
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,
+            "repetition_penalty": repetition_penalty,
             "min_new_tokens": min_new_tokens,
             "max_new_tokens": max_new_tokens,
             "subtalker_params": subtalker_params or {},
+            "applied_params": applied_params or {},
             "input_text_raw": input_text_raw,
             "audio_duration_sec": round(audio_duration_sec, 4) if audio_duration_sec is not None else None,
             "inference_time_sec": round(inference_time_sec, 4) if inference_time_sec is not None else None,
@@ -131,7 +155,7 @@ class BenchmarkSession:
             "torch_reserved_mb": mem.get("torch_reserved_mb", 0.0),
             "torch_peak_allocated_mb": mem.get("torch_peak_allocated_mb", 0.0),
             "driver_used_mb_at_end": mem.get("driver_used_mb_at_end"),
-            "baseline_process_mb": mem.get("baseline_process_mb", 0.0),
+            "baseline_process_mb": proc_baseline,
             "wav_path": str(wav_path) if wav_path else None,
             "wav_sha256": wav_sha256,
             "error_message": error_message,
@@ -143,7 +167,7 @@ class BenchmarkSession:
         return event
 
     def generate_reports(self) -> Dict[str, Any]:
-        """Aggregate per-run events into results_benchmark.csv and summary_metrics.json atomically."""
+        """Aggregate per-run events into results_benchmark.csv and summary_metrics.json atomically (G4)."""
         events = read_benchmark_events(self.events_file)
         if not events:
             return {}
@@ -174,18 +198,19 @@ class BenchmarkSession:
             inf_times = [e["inference_time_sec"] for e in measured_runs if e.get("inference_time_sec") is not None]
             peak_vrams = [e["torch_peak_allocated_mb"] for e in measured_runs if e.get("torch_peak_allocated_mb") is not None]
 
-            rtf_vals.sort()
-            inf_times.sort()
+            # G4: Exact mathematical median using statistics.median
+            # For even length [4.5, 4.7], returns 4.6 (not upper element 4.7)
+            rtf_median_val = round(float(statistics.median(rtf_vals)), 4) if rtf_vals else None
 
             summary["models"][m_id] = {
                 "total_runs": len(m_events),
                 "measured_runs": len(measured_runs),
                 "warmup_runs": len([e for e in m_events if e.get("run_type") == "warmup"]),
                 "error_runs": len([e for e in m_events if e.get("status") == "error"]),
-                "rtf_median": round(rtf_vals[len(rtf_vals) // 2], 4) if rtf_vals else None,
+                "rtf_median": rtf_median_val,
                 "rtf_min": min(rtf_vals) if rtf_vals else None,
                 "rtf_max": max(rtf_vals) if rtf_vals else None,
-                "inference_time_mean_sec": round(sum(inf_times) / len(inf_times), 4) if inf_times else None,
+                "inference_time_mean_sec": round(float(statistics.mean(inf_times)), 4) if inf_times else None,
                 "max_peak_vram_mb": max(peak_vrams) if peak_vrams else None,
             }
 

@@ -1,6 +1,7 @@
 """Profiling runner supporting Tier 2 Smoke and Tier 3 Full Matrix benchmarks (R5, C6, B4)."""
 
 import argparse
+import hashlib
 from pathlib import Path
 import sys
 import time
@@ -68,10 +69,29 @@ def run_profiling(
         adapter = Qwen3EngineAdapter(model_id)
 
         try:
+            # G4: Measure real process memory baseline prior to model load
+            from src.instrumentation.memory import get_memory_snapshot
+            init_mem = get_memory_snapshot()
+            proc_baseline_mb = init_mem.get("torch_allocated_mb")
+
             t_load_0 = time.perf_counter()
             adapter.load(device="cuda:0", dtype_str="bfloat16")
             load_sec = round(time.perf_counter() - t_load_0, 3)
             print(f"[{model_id}] Loaded successfully in {load_sec}s.")
+
+            # G4: Checkpoint, Config and Weights SHA-256 identification
+            config_file = Path(adapter.model_path) / "config.json"
+            config_sha256 = hashlib.sha256(config_file.read_bytes()).hexdigest() if config_file.exists() else None
+
+            weights_file = Path(adapter.model_path) / "model.safetensors"
+            weights_sha256 = None
+            if weights_file.exists():
+                h_w = hashlib.sha256()
+                with open(weights_file, "rb") as wf:
+                    while chunk := wf.read(2 * 1024 * 1024):
+                        h_w.update(chunk)
+                weights_sha256 = h_w.hexdigest()
+            checkpoint_revision = "qwen3-tts-12hz-official"
 
             # Warmup run (mandatory separation)
             print(f"[{model_id}] Executing warmup inference...")
@@ -85,6 +105,10 @@ def run_profiling(
                 measured=False,
                 audio_duration_sec=warm_res.audio.duration_sec,
                 inference_time_sec=warm_res.inference_time_sec,
+                baseline_process_mb=proc_baseline_mb,
+                checkpoint_revision=checkpoint_revision,
+                config_sha256=config_sha256,
+                weights_sha256=weights_sha256,
             )
             print(f"[{model_id}] Warmup complete (RTF: {warm_res.rtf}).")
 
@@ -92,16 +116,20 @@ def run_profiling(
             for case_id, text in test_cases:
                 for it in range(1, n_iters + 1):
                     print(f"[{model_id}][{case_id}] Iteration {it}/{n_iters}...")
+                    dec_params = DecodingParams(seed=42 + it)
                     res = adapter.synthesize_base(
                         text=text,
                         language="italian",
-                        params=DecodingParams(seed=42 + it),
+                        params=dec_params,
                     )
 
-                    # Save WAV
+                    # Save WAV and compute SHA-256 (G4, G6)
                     wav_filename = f"{case_id}_{model_id}_iter{it}.wav"
                     wav_out_path = session.session_dir / wav_filename
+                    t_save_0 = time.perf_counter()
                     sf.write(str(wav_out_path), res.audio.samples, res.audio.sample_rate)
+                    save_time_sec = time.perf_counter() - t_save_0
+                    wav_sha256 = hashlib.sha256(wav_out_path.read_bytes()).hexdigest()
 
                     session.record_run(
                         model_id=model_id,
@@ -111,11 +139,25 @@ def run_profiling(
                         run_type="measured",
                         measured=True,
                         seed=42 + it,
+                        temperature=dec_params.temperature,
+                        top_p=dec_params.top_p,
+                        top_k=dec_params.top_k,
+                        repetition_penalty=dec_params.repetition_penalty,
+                        min_new_tokens=dec_params.min_new_tokens,
+                        max_new_tokens=dec_params.max_new_tokens,
+                        subtalker_params=dec_params.subtalker_params,
+                        applied_params=res.metadata.get("applied_params"),
                         audio_duration_sec=res.audio.duration_sec,
                         inference_time_sec=res.inference_time_sec,
+                        save_time_sec=round(save_time_sec, 4),
+                        baseline_process_mb=proc_baseline_mb,
                         wav_path=str(wav_out_path),
+                        wav_sha256=wav_sha256,
+                        checkpoint_revision=checkpoint_revision,
+                        config_sha256=config_sha256,
+                        weights_sha256=weights_sha256,
                     )
-                    print(f"  -> Generated {res.audio.duration_sec:.2f}s in {res.inference_time_sec:.2f}s (RTF: {res.rtf})")
+                    print(f"  -> Generated {res.audio.duration_sec:.2f}s in {res.inference_time_sec:.2f}s (RTF: {res.rtf}, WAV SHA: {wav_sha256[:8]}...)")
 
         except Exception as e:
             print(f"[{model_id}] Error during profiling: {e}")

@@ -148,7 +148,52 @@ def test_benchmark_session_disaggregation():
         assert m_summary["total_runs"] == 3
         assert m_summary["measured_runs"] == 2
         assert m_summary["warmup_runs"] == 1
-        assert m_summary["rtf_median"] == round(9.2 / 2.0, 4) or m_summary["rtf_median"] in [4.5, 4.7]
+        # G4: Strict mathematical median of [4.5, 4.7] is 4.6
+        assert m_summary["rtf_median"] == 4.6
+
+
+def test_exact_mathematical_rtf_median_mandatory():
+    """G4 Mandatory test: two measured runs with RTF 4.5 and 4.7 must produce exactly median 4.6.
+
+    Verifies that alternative or loose values (such as 4.5 or 4.7 from integer division) are rejected.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session = BenchmarkSession(session_id="test_median_exact", base_dir=Path(tmpdir))
+
+        # Run 1: duration 2.0s, inf time 9.0s -> RTF 4.5
+        session.record_run(
+            model_id="0.6B-Base",
+            test_case_id="TEST_01",
+            iteration_index=1,
+            input_text_raw="Frase 1",
+            run_type="measured",
+            measured=True,
+            audio_duration_sec=2.0,
+            inference_time_sec=9.0,
+            status="success",
+        )
+
+        # Run 2: duration 2.0s, inf time 9.4s -> RTF 4.7
+        session.record_run(
+            model_id="0.6B-Base",
+            test_case_id="TEST_01",
+            iteration_index=2,
+            input_text_raw="Frase 1",
+            run_type="measured",
+            measured=True,
+            audio_duration_sec=2.0,
+            inference_time_sec=9.4,
+            status="success",
+        )
+
+        summary = session.generate_reports()
+        m_summary = summary["models"]["0.6B-Base"]
+
+        # Exact mathematical median of [4.5, 4.7] is 4.6
+        assert m_summary["rtf_median"] == 4.6
+        assert m_summary["rtf_median"] != 4.5
+        assert m_summary["rtf_median"] != 4.7
+
 
 
 def test_m0_artifacts_untouched():
