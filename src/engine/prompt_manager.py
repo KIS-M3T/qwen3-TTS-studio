@@ -146,13 +146,19 @@ def save_voice_prompt_items(
 
     from safetensors.torch import save_file
 
-    save_file(tensor_dict, str(safetensors_path))
+    header_meta = {
+        "schema_version": "1.0",
+        "num_samples": str(len(item_list)),
+        "samples_json": json.dumps(samples_meta),
+    }
+    save_file(tensor_dict, str(safetensors_path), metadata=header_meta)
 
     full_metadata: Dict[str, Any] = {
         "schema_version": "1.0",
         "voice_id": safe_name,
         "format": "safetensors",
         "num_samples": len(item_list),
+        "prompt_items": samples_meta,
         "samples": samples_meta,
         "description": description,
         "ref_audio_paths": ref_audio_paths or [],
@@ -260,9 +266,10 @@ def load_voice_prompt_items(
     voice_dir: Path,
     base_dir: Path = DEFAULT_SAVED_VOICES_DIR,
 ) -> List[Any]:
-    """Load VoiceClonePromptItem list reconstructed from safetensors (G2).
+    """Load VoiceClonePromptItem list reconstructed from safetensors (G2, H2).
 
     Strictly rejects arbitrary pickle deserialization in runtime paths.
+    Tolerantly reconciles engine and UI schema differences without KeyError.
 
     Args:
         voice_dir: Directory containing voice prompt.
@@ -283,27 +290,86 @@ def load_voice_prompt_items(
 
     if safetensors_path.exists():
         from safetensors.torch import load_file
+        from safetensors import safe_open
         from qwen_tts.inference.qwen3_tts_model import VoiceClonePromptItem
 
         tensors = load_file(str(safetensors_path))
 
+        # 1. Read safetensors header metadata if available (G2)
+        header_samples: Optional[List[Dict[str, Any]]] = None
+        try:
+            with safe_open(str(safetensors_path), framework="pt") as sf:
+                header_meta = sf.metadata()
+                if header_meta and "samples_json" in header_meta:
+                    header_samples = json.loads(header_meta["samples_json"])
+        except Exception as e:
+            logger.debug(f"Could not read safetensors header metadata: {e}")
+
+        # 2. Read companion metadata.json
         if metadata_path.exists():
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to read metadata.json in {safe_dir}: {e}")
+                metadata = {}
         else:
             metadata = {}
 
-        samples_meta = metadata.get("samples")
-        if samples_meta is not None and isinstance(samples_meta, list):
+        # 3. Determine samples specification (H2)
+        # Priority order: header_samples -> metadata["prompt_items"] -> metadata["samples"]
+        raw_samples = header_samples
+        if not raw_samples:
+            raw_samples = metadata.get("prompt_items") or metadata.get("prompt_metadata") or metadata.get("samples")
+
+        if raw_samples is not None and isinstance(raw_samples, list) and len(raw_samples) > 0:
             items: List[VoiceClonePromptItem] = []
-            for s_info in samples_meta:
-                idx = s_info["index"]
-                spk_emb = tensors[f"sample_{idx}_ref_spk_embedding"]
-                has_code = s_info.get("has_ref_code", True)
-                ref_code = tensors.get(f"sample_{idx}_ref_code") if has_code else None
-                xvec = s_info.get("x_vector_only_mode", False)
-                icl = s_info.get("icl_mode", not xvec)
-                ref_txt = s_info.get("ref_text")
+            for i, s_info in enumerate(raw_samples):
+                if not isinstance(s_info, dict):
+                    continue
+
+                idx = s_info.get("index", i)
+
+                # Find speaker embedding tensor
+                spk_emb = tensors.get(f"sample_{idx}_ref_spk_embedding")
+                if spk_emb is None:
+                    spk_emb = tensors.get(f"sample_{i}_ref_spk_embedding")
+                if spk_emb is None and i == 0:
+                    spk_emb = tensors.get("ref_spk_embedding")
+
+                if spk_emb is None:
+                    logger.warning(f"Missing speaker embedding for sample {i} (index={idx}) in {safe_dir}")
+                    continue
+
+                # Find ref code tensor
+                has_code_decl = s_info.get("has_ref_code")
+                ref_code = tensors.get(f"sample_{idx}_ref_code")
+                if ref_code is None:
+                    ref_code = tensors.get(f"sample_{i}_ref_code")
+                if ref_code is None and i == 0:
+                    ref_code = tensors.get("ref_code")
+
+                if has_code_decl is False:
+                    ref_code = None
+
+                # Reconcile text
+                ref_txt = (
+                    s_info.get("ref_text")
+                    or s_info.get("transcript")
+                    or metadata.get("ref_text")
+                    or metadata.get("ref_transcript")
+                )
+
+                # Reconcile mode flags
+                if "x_vector_only_mode" in s_info:
+                    xvec = bool(s_info["x_vector_only_mode"])
+                else:
+                    xvec = bool(ref_code is None)
+
+                if "icl_mode" in s_info:
+                    icl = bool(s_info["icl_mode"])
+                else:
+                    icl = bool(not xvec and ref_code is not None)
 
                 items.append(
                     VoiceClonePromptItem(
@@ -314,22 +380,53 @@ def load_voice_prompt_items(
                         ref_text=ref_txt if ref_txt else None,
                     )
                 )
-            return items
-        else:
-            # Single sample legacy or raw dict fallback
-            if "sample_0_ref_spk_embedding" in tensors:
-                spk_emb = tensors["sample_0_ref_spk_embedding"]
-                ref_code = tensors.get("sample_0_ref_code")
-                return [
-                    VoiceClonePromptItem(
-                        ref_code=ref_code,
-                        ref_spk_embedding=spk_emb,
-                        x_vector_only_mode=ref_code is None,
-                        icl_mode=ref_code is not None,
-                        ref_text=metadata.get("ref_transcript"),
-                    )
-                ]
-            return tensors  # type: ignore
+
+            if items:
+                return items
+
+        # 4. Fallback: discover samples directly from tensor keys if no sample list or if parsing failed
+        discovered_items: List[VoiceClonePromptItem] = []
+        i = 0
+        while True:
+            spk_key = f"sample_{i}_ref_spk_embedding"
+            if spk_key not in tensors:
+                break
+            spk_emb = tensors[spk_key]
+            code_key = f"sample_{i}_ref_code"
+            ref_code = tensors.get(code_key)
+            discovered_items.append(
+                VoiceClonePromptItem(
+                    ref_code=ref_code,
+                    ref_spk_embedding=spk_emb,
+                    x_vector_only_mode=ref_code is None,
+                    icl_mode=ref_code is not None,
+                    ref_text=metadata.get("ref_text") or metadata.get("ref_transcript"),
+                )
+            )
+            i += 1
+
+        if discovered_items:
+            return discovered_items
+
+        # 5. Fallback for single flat tensor dictionary
+        if "sample_0_ref_spk_embedding" in tensors or "ref_spk_embedding" in tensors:
+            spk_emb = tensors.get("sample_0_ref_spk_embedding")
+            if spk_emb is None:
+                spk_emb = tensors.get("ref_spk_embedding")
+            ref_code = tensors.get("sample_0_ref_code")
+            if ref_code is None:
+                ref_code = tensors.get("ref_code")
+            return [
+                VoiceClonePromptItem(
+                    ref_code=ref_code,
+                    ref_spk_embedding=spk_emb,
+                    x_vector_only_mode=ref_code is None,
+                    icl_mode=ref_code is not None,
+                    ref_text=metadata.get("ref_text") or metadata.get("ref_transcript"),
+                )
+            ]
+
+        return tensors  # type: ignore
 
     if legacy_pkl_path.exists():
         raise SecurityError(
