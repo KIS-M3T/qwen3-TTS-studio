@@ -535,17 +535,31 @@ def _generate_saved_voice(
         FileNotFoundError: If saved voice not found.
     """
     voice_dir = SAVED_VOICES_DIR / voice_id
+    safetensors_path = voice_dir / "voice_prompt.safetensors"
     prompt_path = voice_dir / "prompt.pkl"
     meta_path = voice_dir / "metadata.json"
 
-    if not prompt_path.exists():
+    if safetensors_path.exists():
+        from safetensors.torch import load_file
+        raw_prompt = load_file(str(safetensors_path))
+    elif prompt_path.exists():
+        if os.environ.get("ALLOW_LEGACY_PICKLE", "0") == "1":
+            with open(prompt_path, "rb") as f:
+                raw_prompt = pickle.load(f)
+        else:
+            raise RuntimeError(
+                f"Legacy pickle prompt at {prompt_path} is blocked by default for security (F1). "
+                "Migrate to non-executable safetensors using 'python scripts/migrate_legacy_prompts.py' "
+                "or set ALLOW_LEGACY_PICKLE=1 if you fully trust this file."
+            )
+    else:
         raise FileNotFoundError(f"Saved voice not found: {voice_id}")
 
-    with open(meta_path) as f:
-        meta = json.load(f)
-
-    with open(prompt_path, "rb") as f:
-        raw_prompt = pickle.load(f)
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+    else:
+        meta = {}
 
     voice_clone_prompt = _prepare_voice_clone_prompt(raw_prompt, model)
     print(

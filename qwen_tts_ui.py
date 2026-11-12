@@ -2242,20 +2242,34 @@ def generate_with_saved_voice(
 
     try:
         voice_dir = SAVED_VOICES_DIR / saved_voice_id
+        safetensors_path = voice_dir / "voice_prompt.safetensors"
         prompt_path = voice_dir / "prompt.pkl"
         meta_path = voice_dir / "metadata.json"
 
-        if not prompt_path.exists():
-            raise gr.Error(f"Voice not found: {saved_voice_id}")
-
-        with open(meta_path) as f:
-            meta = json.load(f)
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+        else:
+            meta = {}
         model_name = meta.get("model", "1.7B-Base")
 
         progress(0.05, desc="Loading voice profile...")
 
-        with open(prompt_path, "rb") as f:
-            voice_clone_prompt = pickle.load(f)
+        if safetensors_path.exists():
+            from safetensors.torch import load_file
+            voice_clone_prompt = load_file(str(safetensors_path))
+        elif prompt_path.exists():
+            if os.environ.get("ALLOW_LEGACY_PICKLE", "0") == "1":
+                with open(prompt_path, "rb") as f:
+                    voice_clone_prompt = pickle.load(f)
+            else:
+                raise gr.Error(
+                    f"Legacy pickle prompt for '{saved_voice_id}' is blocked by default for security (F1). "
+                    "Migrate to non-executable safetensors using 'python scripts/migrate_legacy_prompts.py' "
+                    "or launch with ALLOW_LEGACY_PICKLE=1."
+                )
+        else:
+            raise gr.Error(f"Voice not found: {saved_voice_id}")
 
         # Optionally disable ICL at generation time for cross-lingual output.
         runtime_prompt = voice_clone_prompt
