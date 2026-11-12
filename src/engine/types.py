@@ -134,7 +134,7 @@ class MemorySnapshot:
     torch_reserved_bytes: int
     torch_peak_allocated_bytes: int
     driver_used_bytes_at_end: Optional[int]
-    baseline_process_bytes: int
+    baseline_process_bytes: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -147,3 +147,5 @@ class GenerationResult:
     model_version: str
     decoding_params: DecodingParams
     environment_manifest_sha256: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+

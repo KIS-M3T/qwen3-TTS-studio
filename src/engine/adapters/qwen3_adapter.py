@@ -1,11 +1,12 @@
-"""Concrete adapter for Alibaba Qwen3-TTS models (WP2, C1, C5, F5)."""
+"""Concrete adapter for Alibaba Qwen3-TTS models (WP2, C1, C5, F5, G1, G3)."""
 
 import gc
+import logging
 import os
 from pathlib import Path
 import shutil
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 
 from src.engine.base import BaseTTSEngine
@@ -22,6 +23,8 @@ from src.engine.types import (
 from src.instrumentation.manifest import get_environment_manifest
 from src.instrumentation.memory import get_memory_snapshot
 
+logger = logging.getLogger(__name__)
+
 KNOWN_REF_TRANSCRIPTS = {
     "ref_voice_it_01.wav": "Pone sotto la propria egida il campionato e la Nazionale libanese.",
     "ref_voice_it_02.wav": "A tutt'oggi viene venduto su eBay a cifre esorbitanti.",
@@ -33,6 +36,20 @@ MODEL_PATHS = {
     "1.7B-CustomVoice": "./Qwen3-TTS-12Hz-1.7B-CustomVoice",
     "0.6B-CustomVoice": "./Qwen3-TTS-12Hz-0.6B-CustomVoice",
     "1.7B-VoiceDesign": "./Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+}
+
+# Standard vendor supported decoding kwargs for Qwen3-TTS
+SUPPORTED_VENDOR_KWARGS = {
+    "temperature",
+    "top_p",
+    "top_k",
+    "repetition_penalty",
+    "max_new_tokens",
+    "subtalker_temperature",
+    "subtalker_top_p",
+    "subtalker_top_k",
+    "subtalker_dosample",
+    "do_sample",
 }
 
 
@@ -71,10 +88,38 @@ class Qwen3EngineAdapter(BaseTTSEngine):
     def state(self) -> LifecycleState:
         return self.lifecycle.state
 
+    def _release_model_refs(self) -> None:
+        """Sever all model and cache references before GC / empty cache (G3)."""
+        self.model = None
+        self.cached_prompt = None
+        self.cached_prompt_ref = None
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
     def load(self, device: str = "cuda:0", dtype_str: str = "bfloat16") -> None:
-        """Load model weights and allocate GPU resources."""
+        """Load model weights, coordinate single-resident policy, and check VRAM (G3)."""
         self.lifecycle.begin_loading()
         _check_qwen_tts_version()
+
+        # 1. Enforce single resident model policy across adapters (G3)
+        self.lifecycle.acquire_residency(self.model_id)
+
+        # 2. Check preventive VRAM requirements (G3)
+        required_vram_mb = 3500.0 if "0.6b" in self.model_id.lower() else 7500.0
+        if not self.lifecycle.check_vram_requirement(required_vram_mb):
+            self.lifecycle.mark_unloaded()
+            raise EngineOOMError(
+                f"Insufficient VRAM for {self.model_id}: requires at least {required_vram_mb} MB available.",
+                is_recoverable=True,
+            )
 
         if not os.path.exists(self.model_path):
             self.lifecycle.mark_unloaded()
@@ -108,29 +153,17 @@ class Qwen3EngineAdapter(BaseTTSEngine):
 
             self.lifecycle.mark_ready()
         except torch.cuda.OutOfMemoryError as oom:
-            err = self.lifecycle.handle_oom(oom)
+            err = self.lifecycle.handle_oom(oom, release_callback=self._release_model_refs)
             raise err from oom
         except Exception as e:
+            # Guaranteed rollback on failed load (G3)
+            self._release_model_refs()
             self.lifecycle.mark_unloaded()
             raise ModelLoadError(f"Failed to load {self.model_id}: {e}") from e
 
     def unload(self) -> None:
-        """Unload model and release VRAM."""
-        del self.model
-        self.model = None
-        self.cached_prompt = None
-        self.cached_prompt_ref = None
-
-        gc.collect()
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-        except Exception:
-            pass
-
+        """Unload model, release VRAM, and release residency (G3)."""
+        self._release_model_refs()
         self.lifecycle.mark_unloaded()
 
     def _apply_anti_truncation_patch(self) -> None:
@@ -198,6 +231,32 @@ class Qwen3EngineAdapter(BaseTTSEngine):
             speaker_id=speaker_id,
         )
 
+    def create_voice_prompt(
+        self,
+        ref_audio_path: str,
+        ref_transcript: Optional[str] = None,
+        x_vector_only: bool = False,
+    ) -> VoicePrompt:
+        """Extract conditioning voice prompt embedding from reference clip (G2)."""
+        if self.state != LifecycleState.READY or self.model is None:
+            raise RuntimeError(f"Model {self.model_id} must be loaded and READY to extract voice prompts.")
+
+        prompt_items = self.model.create_voice_clone_prompt(
+            ref_audio=ref_audio_path,
+            ref_text=ref_transcript,
+            x_vector_only_mode=x_vector_only,
+        )
+
+        return VoicePrompt(
+            voice_id=Path(ref_audio_path).stem,
+            ref_audio_path=Path(ref_audio_path),
+            ref_transcript=ref_transcript,
+            x_vector_only=x_vector_only,
+            serialized_format="safetensors",
+            raw_prompt_payload=prompt_items,
+        )
+
+
     def _generate_internal(
         self,
         text: str,
@@ -207,13 +266,59 @@ class Qwen3EngineAdapter(BaseTTSEngine):
         voice_prompt: Optional[VoicePrompt] = None,
         speaker_id: Optional[str] = None,
     ) -> GenerationResult:
-        """Internal execution helper with CUDA synchronization and AudioBuffer validation."""
+        """Internal execution helper with parameter forwarding, seed isolation, and validation (G1, G3)."""
         if self.state != LifecycleState.READY or self.model is None:
             raise RuntimeError(f"Model {self.model_id} is not in READY state (current: {self.state})")
 
         p = params or DecodingParams()
 
+        # G1: Parameter extraction and validation
+        requested_params: Dict[str, Any] = {
+            "temperature": p.temperature,
+            "top_p": p.top_p,
+            "top_k": p.top_k,
+            "repetition_penalty": p.repetition_penalty,
+            "min_new_tokens": p.min_new_tokens,
+            "max_new_tokens": p.max_new_tokens,
+            "seed": p.seed,
+            **p.subtalker_params,
+        }
+
+        # Build kwargs for vendor API
+        applied_params: Dict[str, Any] = {
+            "temperature": float(p.temperature),
+            "top_p": float(p.top_p),
+            "top_k": int(p.top_k),
+            "repetition_penalty": float(p.repetition_penalty),
+            "max_new_tokens": int(p.max_new_tokens),
+        }
+        for sub_k in ("subtalker_temperature", "subtalker_top_p", "subtalker_top_k", "subtalker_dosample"):
+            if sub_k in p.subtalker_params:
+                applied_params[sub_k] = p.subtalker_params[sub_k]
+
+        # Identify unsupported params
+        unsupported_params: Dict[str, Any] = {
+            k: v for k, v in p.subtalker_params.items()
+            if k not in SUPPORTED_VENDOR_KWARGS
+        }
+        if unsupported_params:
+            logger.warning(f"Unsupported decoding parameters ignored: {list(unsupported_params.keys())}")
+
         import torch
+
+        # G1: Concurrency-aware seed management (RNG isolation)
+        prev_rng_state = None
+        prev_cuda_rng_state = None
+        if p.seed is not None:
+            try:
+                prev_rng_state = torch.get_rng_state()
+                if torch.cuda.is_available():
+                    prev_cuda_rng_state = torch.cuda.get_rng_state_all()
+                torch.manual_seed(p.seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(p.seed)
+            except Exception as rng_err:
+                logger.warning(f"Unable to isolate RNG seed: {rng_err}")
 
         try:
             if torch.cuda.is_available():
@@ -222,16 +327,19 @@ class Qwen3EngineAdapter(BaseTTSEngine):
 
             t0 = time.perf_counter()
 
+            # Vendor API kwargs forwarding (G1)
+            vendor_kwargs: Dict[str, Any] = dict(applied_params)
+
             if mode == "custom":
                 wavs, sr = self.model.generate_custom_voice(
                     text=text,
                     speaker=speaker_id or "vivian",
                     language=language,
+                    **vendor_kwargs,
                 )
             elif mode == "clone":
                 prompt_payload = voice_prompt.raw_prompt_payload if voice_prompt else None
                 if prompt_payload is None and voice_prompt:
-                    # Extract prompt on-the-fly if not pre-extracted
                     prompt_payload = self.model.create_voice_clone_prompt(
                         ref_audio=str(voice_prompt.ref_audio_path),
                         ref_text=voice_prompt.ref_transcript,
@@ -241,6 +349,7 @@ class Qwen3EngineAdapter(BaseTTSEngine):
                     text=text,
                     voice_clone_prompt=prompt_payload,
                     language=language,
+                    **vendor_kwargs,
                 )
             else:
                 # Base zero-shot synthesis: use default technical reference voice prompt
@@ -258,6 +367,7 @@ class Qwen3EngineAdapter(BaseTTSEngine):
                     text=text,
                     voice_clone_prompt=self.cached_prompt,
                     language=language,
+                    **vendor_kwargs,
                 )
 
             if torch.cuda.is_available():
@@ -268,7 +378,6 @@ class Qwen3EngineAdapter(BaseTTSEngine):
             # Convert to float32 numpy array and normalize if needed
             raw_audio = np.array(wavs[0], dtype=np.float32)
 
-            # Range normalization check
             max_abs = float(np.max(np.abs(raw_audio))) if raw_audio.size > 0 else 0.0
             if max_abs > 1.0:
                 raw_audio = raw_audio / max_abs
@@ -282,8 +391,17 @@ class Qwen3EngineAdapter(BaseTTSEngine):
                 torch_reserved_bytes=int(mem_dict["torch_reserved_mb"] * 1024 * 1024),
                 torch_peak_allocated_bytes=int(mem_dict["torch_peak_allocated_mb"] * 1024 * 1024),
                 driver_used_bytes_at_end=int(mem_dict["driver_used_mb_at_end"] * 1024 * 1024) if mem_dict["driver_used_mb_at_end"] else None,
-                baseline_process_bytes=int(mem_dict["baseline_process_mb"] * 1024 * 1024),
+                baseline_process_bytes=int(mem_dict["baseline_process_mb"] * 1024 * 1024) if mem_dict.get("baseline_process_mb") is not None else None,
             )
+
+            # G1: Metadata reporting requested vs applied vs unsupported
+            metadata: Dict[str, Any] = {
+                "requested_params": requested_params,
+                "applied_params": applied_params,
+                "unsupported_params": unsupported_params,
+                "seed_applied": p.seed,
+                "mode": mode,
+            }
 
             return GenerationResult(
                 audio=audio_buf,
@@ -292,42 +410,15 @@ class Qwen3EngineAdapter(BaseTTSEngine):
                 memory=mem_snap,
                 model_version=self.model_id,
                 decoding_params=p,
-                environment_manifest_sha256=self.manifest["manifest_sha256"],
+                environment_manifest_sha256=self.manifest.get("manifest_sha256", "unknown"),
+                metadata=metadata,
             )
-
-        except torch.cuda.OutOfMemoryError as oom:
-            err = self.lifecycle.handle_oom(oom)
-            raise err from oom
-
-    def create_voice_prompt(
-        self,
-        ref_audio_path: str,
-        ref_transcript: Optional[str] = None,
-        x_vector_only: bool = False,
-    ) -> VoicePrompt:
-        """Extract conditioning prompt from reference audio."""
-        if self.state != LifecycleState.READY or self.model is None:
-            raise RuntimeError(f"Model {self.model_id} must be in READY state to extract voice prompts.")
-
-        ref_path = Path(ref_audio_path)
-        transcript = ref_transcript or KNOWN_REF_TRANSCRIPTS.get(ref_path.name)
-
-        if transcript and not x_vector_only:
-            payload = self.model.create_voice_clone_prompt(
-                ref_audio=str(ref_path),
-                ref_text=transcript,
-            )
-        else:
-            payload = self.model.create_voice_clone_prompt(
-                ref_audio=str(ref_path),
-                x_vector_only_mode=True,
-            )
-
-        return VoicePrompt(
-            voice_id=ref_path.stem,
-            ref_audio_path=ref_path,
-            ref_transcript=transcript,
-            x_vector_only=x_vector_only,
-            serialized_format="safetensors",
-            raw_prompt_payload=payload,
-        )
+        finally:
+            # G1: Restore RNG state to prevent cross-request contamination
+            if prev_rng_state is not None:
+                try:
+                    torch.set_rng_state(prev_rng_state)
+                    if prev_cuda_rng_state is not None and torch.cuda.is_available():
+                        torch.cuda.set_rng_state_all(prev_cuda_rng_state)
+                except Exception:
+                    pass
