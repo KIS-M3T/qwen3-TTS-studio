@@ -1,9 +1,10 @@
-"""Lifecycle management, state transitions, dynamic VRAM gating, residency coordination, and OOM recovery (C2, G3)."""
+"""Lifecycle management, state transitions, dynamic VRAM gating, residency coordination, and OOM recovery (C2, G3, H1, H5, H6)."""
 
 import gc
 import logging
 import threading
 from typing import Callable, Optional
+import uuid
 
 from src.engine.errors import EngineOOMError
 from src.engine.types import LifecycleState
@@ -14,12 +15,17 @@ logger = logging.getLogger(__name__)
 class ModelLifecycleManager:
     """Manages model state transitions, single-resident concurrency, and guarded CUDA recovery."""
 
-    # Class-level residency lock and tracker across adapter instances (G3)
+    # Class-level residency lock and tracker across adapter instances (G3, H5)
     _residency_lock = threading.Lock()
-    _active_resident_id: Optional[str] = None
+    _active_resident_owner_id: Optional[str] = None
+    _active_resident_model_id: Optional[str] = None
 
-    def __init__(self, model_id: str):
+    # Global generation critical section to guarantee thread-safe RNG and GPU isolation (H5)
+    _gpu_generation_lock = threading.Lock()
+
+    def __init__(self, model_id: str, owner_id: Optional[str] = None):
         self.model_id = model_id
+        self.owner_id = owner_id or f"{model_id}_{uuid.uuid4().hex[:8]}"
         self._state = LifecycleState.UNLOADED
         self._baseline_allocated_mb: Optional[float] = None
 
@@ -28,28 +34,42 @@ class ModelLifecycleManager:
         return self._state
 
     @classmethod
+    def get_active_resident_owner_id(cls) -> Optional[str]:
+        """Return the owner_id of the currently resident adapter, or None."""
+        with cls._residency_lock:
+            return cls._active_resident_owner_id
+
+    @classmethod
     def get_active_resident_id(cls) -> Optional[str]:
         """Return the model_id of the currently resident model, or None."""
         with cls._residency_lock:
-            return cls._active_resident_id
+            return cls._active_resident_model_id
 
     @classmethod
-    def acquire_residency(cls, model_id: str) -> None:
-        """Enforce single resident model policy across adapters (G3)."""
+    def acquire_residency(cls, owner_id: str, model_id: str) -> None:
+        """Enforce single resident model policy bound to owner identity (H5)."""
         with cls._residency_lock:
-            if cls._active_resident_id is not None and cls._active_resident_id != model_id:
+            if cls._active_resident_owner_id is not None and cls._active_resident_owner_id != owner_id:
                 raise RuntimeError(
-                    f"Residency conflict: model '{cls._active_resident_id}' is currently resident in GPU memory. "
-                    f"It must be unloaded before loading '{model_id}'."
+                    f"Residency conflict: model '{cls._active_resident_model_id}' "
+                    f"(owner: {cls._active_resident_owner_id}) is currently resident in GPU memory. "
+                    f"It must be unloaded before loading '{model_id}' (owner: {owner_id})."
                 )
-            cls._active_resident_id = model_id
+            cls._active_resident_owner_id = owner_id
+            cls._active_resident_model_id = model_id
 
     @classmethod
-    def release_residency(cls, model_id: str) -> None:
-        """Release residency if held by model_id."""
+    def release_residency(cls, owner_id: str) -> None:
+        """Release residency if held by owner_id (H5)."""
         with cls._residency_lock:
-            if cls._active_resident_id == model_id:
-                cls._active_resident_id = None
+            if cls._active_resident_owner_id == owner_id:
+                cls._active_resident_owner_id = None
+                cls._active_resident_model_id = None
+
+    @classmethod
+    def gpu_generation_lock(cls) -> threading.Lock:
+        """Return global GPU generation lock for RNG thread safety (H5)."""
+        return cls._gpu_generation_lock
 
     def begin_loading(self) -> None:
         """Transition from UNLOADED to LOADING."""
@@ -64,12 +84,12 @@ class ModelLifecycleManager:
     def mark_unloaded(self) -> None:
         """Transition to UNLOADED after clean resource release."""
         self._state = LifecycleState.UNLOADED
-        self.release_residency(self.model_id)
+        self.release_residency(self.owner_id)
 
     def mark_failed(self) -> None:
         """Transition to FAILED upon unrecoverable error."""
         self._state = LifecycleState.FAILED
-        self.release_residency(self.model_id)
+        self.release_residency(self.owner_id)
 
     def check_vram_requirement(self, required_mb: float) -> bool:
         """Verify available VRAM exceeds requirement before loading (G3)."""
@@ -89,7 +109,7 @@ class ModelLifecycleManager:
         error: Exception,
         release_callback: Optional[Callable[[], None]] = None,
     ) -> EngineOOMError:
-        """Execute OOM cleanup with guaranteed reference severance and diagnostic probe (G3).
+        """Execute OOM cleanup with guaranteed reference severance and diagnostic probe (G3, H1).
 
         Note: Probe allocation is strictly a preliminary diagnostic check of CUDA context
         integrity; it is NEVER treated as sufficient proof of full operational recovery.
@@ -105,7 +125,7 @@ class ModelLifecycleManager:
                 logger.warning(f"Error during OOM release callback: {cb_err}")
 
         # 2. Release residency
-        self.release_residency(self.model_id)
+        self.release_residency(self.owner_id)
 
         # 3. Garbage collection
         gc.collect()

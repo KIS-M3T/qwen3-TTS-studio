@@ -1,4 +1,4 @@
-"""Concrete adapter for Alibaba Qwen3-TTS models (WP2, C1, C5, F5, G1, G3)."""
+"""Concrete adapter for Alibaba Qwen3-TTS models (WP2, C1, C5, F5, G1, G3, H1, H5, H6)."""
 
 import gc
 import logging
@@ -7,7 +7,9 @@ from pathlib import Path
 import shutil
 import time
 from typing import Any, Dict, List, Optional
+import uuid
 import numpy as np
+import torch
 
 from src.engine.base import BaseTTSEngine
 from src.engine.errors import ModelLoadError, EngineOOMError, ConfigurationError
@@ -50,6 +52,8 @@ SUPPORTED_VENDOR_KWARGS = {
     "subtalker_top_k",
     "subtalker_dosample",
     "do_sample",
+    "instruct",
+    "non_streaming_mode",
 }
 
 
@@ -73,8 +77,9 @@ class Qwen3EngineAdapter(BaseTTSEngine):
 
     def __init__(self, model_id: str, model_path: Optional[str] = None):
         self._model_id = model_id
+        self.instance_id = f"{model_id}_{uuid.uuid4().hex[:8]}"
         self.model_path = model_path or MODEL_PATHS.get(model_id, f"./Qwen3-TTS-12Hz-{model_id}")
-        self.lifecycle = ModelLifecycleManager(model_id)
+        self.lifecycle = ModelLifecycleManager(model_id, owner_id=self.instance_id)
         self.model: Any = None
         self.cached_prompt: Any = None
         self.cached_prompt_ref: Optional[str] = None
@@ -89,15 +94,13 @@ class Qwen3EngineAdapter(BaseTTSEngine):
         return self.lifecycle.state
 
     def _release_model_refs(self) -> None:
-        """Sever all model and cache references before GC / empty cache (G3)."""
+        """Sever all model and cache references before GC / empty cache (G3, H1)."""
         self.model = None
         self.cached_prompt = None
         self.cached_prompt_ref = None
 
         gc.collect()
         try:
-            import torch
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
@@ -105,35 +108,36 @@ class Qwen3EngineAdapter(BaseTTSEngine):
             pass
 
     def load(self, device: str = "cuda:0", dtype_str: str = "bfloat16") -> None:
-        """Load model weights, coordinate single-resident policy, and check VRAM (G3)."""
+        """Transactionally load model weights with complete rollback on failure (H6)."""
         self.lifecycle.begin_loading()
-        _check_qwen_tts_version()
-
-        # 1. Enforce single resident model policy across adapters (G3)
-        self.lifecycle.acquire_residency(self.model_id)
-
-        # 2. Check preventive VRAM requirements (G3)
-        required_vram_mb = 3500.0 if "0.6b" in self.model_id.lower() else 7500.0
-        if not self.lifecycle.check_vram_requirement(required_vram_mb):
-            self.lifecycle.mark_unloaded()
-            raise EngineOOMError(
-                f"Insufficient VRAM for {self.model_id}: requires at least {required_vram_mb} MB available.",
-                is_recoverable=True,
-            )
-
-        if not os.path.exists(self.model_path):
-            self.lifecycle.mark_unloaded()
-            raise ModelLoadError(f"Model path not found: {self.model_path}")
-
-        # Ensure speech tokenizer weights are in destination folder
-        tok_src = Path("Qwen3-TTS-Tokenizer-12Hz/model.safetensors")
-        tok_dst = Path(self.model_path) / "speech_tokenizer" / "model.safetensors"
-        if tok_src.exists() and not tok_dst.exists():
-            tok_dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(tok_src, tok_dst)
 
         try:
-            import torch
+            # 1. Version check
+            _check_qwen_tts_version()
+
+            # 2. Enforce single resident model policy bound to instance identity (H5)
+            self.lifecycle.acquire_residency(self.instance_id, self.model_id)
+
+            # 3. Check preventive VRAM requirements (G3)
+            required_vram_mb = 3500.0 if "0.6b" in self.model_id.lower() else 7500.0
+            if not self.lifecycle.check_vram_requirement(required_vram_mb):
+                raise EngineOOMError(
+                    f"Insufficient VRAM for {self.model_id}: requires at least {required_vram_mb} MB available.",
+                    is_recoverable=True,
+                )
+
+            # 4. Check model path existence
+            if not os.path.exists(self.model_path):
+                raise ModelLoadError(f"Model path not found: {self.model_path}")
+
+            # 5. Ensure speech tokenizer weights exist in destination
+            tok_src = Path("Qwen3-TTS-Tokenizer-12Hz/model.safetensors")
+            tok_dst = Path(self.model_path) / "speech_tokenizer" / "model.safetensors"
+            if tok_src.exists() and not tok_dst.exists():
+                tok_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(tok_src, tok_dst)
+
+            # 6. Load model weights
             from qwen_tts import Qwen3TTSModel
 
             target_dtype = torch.bfloat16 if dtype_str == "bfloat16" and torch.cuda.is_bf16_supported() else torch.float32
@@ -148,21 +152,24 @@ class Qwen3EngineAdapter(BaseTTSEngine):
             self.model = Qwen3TTSModel.from_pretrained(self.model_path, **load_kwargs)
             self.model.model.eval()
 
-            # Apply baseline anti-truncation patch wrapper
+            # 7. Apply baseline anti-truncation patch wrapper
             self._apply_anti_truncation_patch()
 
             self.lifecycle.mark_ready()
+
         except torch.cuda.OutOfMemoryError as oom:
             err = self.lifecycle.handle_oom(oom, release_callback=self._release_model_refs)
             raise err from oom
         except Exception as e:
-            # Guaranteed rollback on failed load (G3)
+            # Transactional rollback: guarantees state returns to UNLOADED without orphan refs (H6)
             self._release_model_refs()
             self.lifecycle.mark_unloaded()
+            if isinstance(e, (EngineOOMError, ModelLoadError)):
+                raise e
             raise ModelLoadError(f"Failed to load {self.model_id}: {e}") from e
 
     def unload(self) -> None:
-        """Unload model, release VRAM, and release residency (G3)."""
+        """Unload model, release VRAM, and release residency (G3, H5)."""
         self._release_model_refs()
         self.lifecycle.mark_unloaded()
 
@@ -256,7 +263,6 @@ class Qwen3EngineAdapter(BaseTTSEngine):
             raw_prompt_payload=prompt_items,
         )
 
-
     def _generate_internal(
         self,
         text: str,
@@ -266,7 +272,7 @@ class Qwen3EngineAdapter(BaseTTSEngine):
         voice_prompt: Optional[VoicePrompt] = None,
         speaker_id: Optional[str] = None,
     ) -> GenerationResult:
-        """Internal execution helper with parameter forwarding, seed isolation, and validation (G1, G3)."""
+        """Internal execution helper with parameter forwarding, seed isolation, and OOM intercept (G1, G3, H1, H5)."""
         if self.state != LifecycleState.READY or self.model is None:
             raise RuntimeError(f"Model {self.model_id} is not in READY state (current: {self.state})")
 
@@ -292,11 +298,17 @@ class Qwen3EngineAdapter(BaseTTSEngine):
             "repetition_penalty": float(p.repetition_penalty),
             "max_new_tokens": int(p.max_new_tokens),
         }
-        for sub_k in ("subtalker_temperature", "subtalker_top_p", "subtalker_top_k", "subtalker_dosample"):
+        for sub_k in (
+            "subtalker_temperature",
+            "subtalker_top_p",
+            "subtalker_top_k",
+            "subtalker_dosample",
+            "instruct",
+            "non_streaming_mode",
+        ):
             if sub_k in p.subtalker_params:
                 applied_params[sub_k] = p.subtalker_params[sub_k]
 
-        # Identify unsupported params
         unsupported_params: Dict[str, Any] = {
             k: v for k, v in p.subtalker_params.items()
             if k not in SUPPORTED_VENDOR_KWARGS
@@ -304,121 +316,124 @@ class Qwen3EngineAdapter(BaseTTSEngine):
         if unsupported_params:
             logger.warning(f"Unsupported decoding parameters ignored: {list(unsupported_params.keys())}")
 
-        import torch
+        # H5: Critical section for GPU generation and RNG state isolation
+        with ModelLifecycleManager.gpu_generation_lock():
+            prev_rng_state = None
+            prev_cuda_rng_state = None
 
-        # G1: Concurrency-aware seed management (RNG isolation)
-        prev_rng_state = None
-        prev_cuda_rng_state = None
-        if p.seed is not None:
+            if p.seed is not None:
+                try:
+                    prev_rng_state = torch.get_rng_state()
+                    if torch.cuda.is_available():
+                        prev_cuda_rng_state = torch.cuda.get_rng_state_all()
+                    torch.manual_seed(p.seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(p.seed)
+                except Exception as rng_err:
+                    logger.warning(f"Unable to isolate RNG seed: {rng_err}")
+
             try:
-                prev_rng_state = torch.get_rng_state()
                 if torch.cuda.is_available():
-                    prev_cuda_rng_state = torch.cuda.get_rng_state_all()
-                torch.manual_seed(p.seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(p.seed)
-            except Exception as rng_err:
-                logger.warning(f"Unable to isolate RNG seed: {rng_err}")
+                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.synchronize()
 
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.synchronize()
+                t0 = time.perf_counter()
 
-            t0 = time.perf_counter()
+                vendor_kwargs: Dict[str, Any] = dict(applied_params)
 
-            # Vendor API kwargs forwarding (G1)
-            vendor_kwargs: Dict[str, Any] = dict(applied_params)
-
-            if mode == "custom":
-                wavs, sr = self.model.generate_custom_voice(
-                    text=text,
-                    speaker=speaker_id or "vivian",
-                    language=language,
-                    **vendor_kwargs,
-                )
-            elif mode == "clone":
-                prompt_payload = voice_prompt.raw_prompt_payload if voice_prompt else None
-                if prompt_payload is None and voice_prompt:
-                    prompt_payload = self.model.create_voice_clone_prompt(
-                        ref_audio=str(voice_prompt.ref_audio_path),
-                        ref_text=voice_prompt.ref_transcript,
-                        x_vector_only_mode=voice_prompt.x_vector_only,
-                    )
-                wavs, sr = self.model.generate_voice_clone(
-                    text=text,
-                    voice_clone_prompt=prompt_payload,
-                    language=language,
-                    **vendor_kwargs,
-                )
-            else:
-                # Base zero-shot synthesis: use default technical reference voice prompt
-                if self.cached_prompt is None:
-                    default_ref = Path("bench/reference_voices/ref_voice_it_01.wav")
-                    ref_text = KNOWN_REF_TRANSCRIPTS.get(default_ref.name)
-                    if default_ref.exists():
-                        self.cached_prompt = self.model.create_voice_clone_prompt(
-                            ref_audio=str(default_ref),
-                            ref_text=ref_text,
+                try:
+                    if mode == "custom":
+                        wavs, sr = self.model.generate_custom_voice(
+                            text=text,
+                            speaker=speaker_id or "vivian",
+                            language=language,
+                            **vendor_kwargs,
+                        )
+                    elif mode == "clone":
+                        prompt_payload = voice_prompt.raw_prompt_payload if voice_prompt else None
+                        if prompt_payload is None and voice_prompt:
+                            prompt_payload = self.model.create_voice_clone_prompt(
+                                ref_audio=str(voice_prompt.ref_audio_path),
+                                ref_text=voice_prompt.ref_transcript,
+                                x_vector_only_mode=voice_prompt.x_vector_only,
+                            )
+                        wavs, sr = self.model.generate_voice_clone(
+                            text=text,
+                            voice_clone_prompt=prompt_payload,
+                            language=language,
+                            **vendor_kwargs,
                         )
                     else:
-                        raise RuntimeError(f"Reference voice audio required for Base model {self.model_id}.")
-                wavs, sr = self.model.generate_voice_clone(
-                    text=text,
-                    voice_clone_prompt=self.cached_prompt,
-                    language=language,
-                    **vendor_kwargs,
+                        # Base zero-shot synthesis: use default technical reference voice prompt
+                        if self.cached_prompt is None:
+                            default_ref = Path("bench/reference_voices/ref_voice_it_01.wav")
+                            ref_text = KNOWN_REF_TRANSCRIPTS.get(default_ref.name)
+                            if default_ref.exists():
+                                self.cached_prompt = self.model.create_voice_clone_prompt(
+                                    ref_audio=str(default_ref),
+                                    ref_text=ref_text,
+                                )
+                            else:
+                                raise RuntimeError(f"Reference voice audio required for Base model {self.model_id}.")
+                        wavs, sr = self.model.generate_voice_clone(
+                            text=text,
+                            voice_clone_prompt=self.cached_prompt,
+                            language=language,
+                            **vendor_kwargs,
+                        )
+                except torch.cuda.OutOfMemoryError as oom:
+                    # H1: Intercept OOM during generation, activate lifecycle recovery and release references
+                    logger.error(f"OOM during inference execution in {self.model_id}: {oom}")
+                    err = self.lifecycle.handle_oom(oom, release_callback=self._release_model_refs)
+                    raise err from oom
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                inf_time = time.perf_counter() - t0
+
+                raw_audio = np.array(wavs[0], dtype=np.float32)
+
+                max_abs = float(np.max(np.abs(raw_audio))) if raw_audio.size > 0 else 0.0
+                if max_abs > 1.0:
+                    raw_audio = raw_audio / max_abs
+
+                audio_buf = AudioBuffer(samples=raw_audio, sample_rate=sr)
+                rtf = round(inf_time / audio_buf.duration_sec, 4)
+
+                mem_dict = get_memory_snapshot()
+                mem_snap = MemorySnapshot(
+                    torch_allocated_bytes=int(mem_dict["torch_allocated_mb"] * 1024 * 1024),
+                    torch_reserved_bytes=int(mem_dict["torch_reserved_mb"] * 1024 * 1024),
+                    torch_peak_allocated_bytes=int(mem_dict["torch_peak_allocated_mb"] * 1024 * 1024),
+                    driver_used_bytes_at_end=int(mem_dict["driver_used_mb_at_end"] * 1024 * 1024) if mem_dict["driver_used_mb_at_end"] else None,
+                    baseline_process_bytes=int(mem_dict["baseline_process_mb"] * 1024 * 1024) if mem_dict.get("baseline_process_mb") is not None else None,
                 )
 
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+                metadata: Dict[str, Any] = {
+                    "requested_params": requested_params,
+                    "applied_params": applied_params,
+                    "unsupported_params": unsupported_params,
+                    "seed_applied": p.seed,
+                    "mode": mode,
+                }
 
-            inf_time = time.perf_counter() - t0
-
-            # Convert to float32 numpy array and normalize if needed
-            raw_audio = np.array(wavs[0], dtype=np.float32)
-
-            max_abs = float(np.max(np.abs(raw_audio))) if raw_audio.size > 0 else 0.0
-            if max_abs > 1.0:
-                raw_audio = raw_audio / max_abs
-
-            audio_buf = AudioBuffer(samples=raw_audio, sample_rate=sr)
-            rtf = round(inf_time / audio_buf.duration_sec, 4)
-
-            mem_dict = get_memory_snapshot()
-            mem_snap = MemorySnapshot(
-                torch_allocated_bytes=int(mem_dict["torch_allocated_mb"] * 1024 * 1024),
-                torch_reserved_bytes=int(mem_dict["torch_reserved_mb"] * 1024 * 1024),
-                torch_peak_allocated_bytes=int(mem_dict["torch_peak_allocated_mb"] * 1024 * 1024),
-                driver_used_bytes_at_end=int(mem_dict["driver_used_mb_at_end"] * 1024 * 1024) if mem_dict["driver_used_mb_at_end"] else None,
-                baseline_process_bytes=int(mem_dict["baseline_process_mb"] * 1024 * 1024) if mem_dict.get("baseline_process_mb") is not None else None,
-            )
-
-            # G1: Metadata reporting requested vs applied vs unsupported
-            metadata: Dict[str, Any] = {
-                "requested_params": requested_params,
-                "applied_params": applied_params,
-                "unsupported_params": unsupported_params,
-                "seed_applied": p.seed,
-                "mode": mode,
-            }
-
-            return GenerationResult(
-                audio=audio_buf,
-                inference_time_sec=round(inf_time, 4),
-                rtf=rtf,
-                memory=mem_snap,
-                model_version=self.model_id,
-                decoding_params=p,
-                environment_manifest_sha256=self.manifest.get("manifest_sha256", "unknown"),
-                metadata=metadata,
-            )
-        finally:
-            # G1: Restore RNG state to prevent cross-request contamination
-            if prev_rng_state is not None:
-                try:
-                    torch.set_rng_state(prev_rng_state)
-                    if prev_cuda_rng_state is not None and torch.cuda.is_available():
-                        torch.cuda.set_rng_state_all(prev_cuda_rng_state)
-                except Exception:
-                    pass
+                return GenerationResult(
+                    audio=audio_buf,
+                    inference_time_sec=round(inf_time, 4),
+                    rtf=rtf,
+                    memory=mem_snap,
+                    model_version=self.model_id,
+                    decoding_params=p,
+                    environment_manifest_sha256=self.manifest.get("manifest_sha256", "unknown"),
+                    metadata=metadata,
+                )
+            finally:
+                # G1, H5: Restore RNG state
+                if prev_rng_state is not None:
+                    try:
+                        torch.set_rng_state(prev_rng_state)
+                        if prev_cuda_rng_state is not None and torch.cuda.is_available():
+                            torch.cuda.set_rng_state_all(prev_cuda_rng_state)
+                    except Exception:
+                        pass

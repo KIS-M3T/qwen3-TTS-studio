@@ -99,7 +99,7 @@ class AudioBuffer:
 class VoicePrompt:
     """Conditioning voice prompt for voice cloning."""
     voice_id: str
-    ref_audio_path: Path
+    ref_audio_path: Optional[Path] = None
     ref_transcript: Optional[str] = None
     x_vector_only: bool = False
     serialized_format: str = "safetensors"
