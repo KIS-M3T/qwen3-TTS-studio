@@ -146,11 +146,12 @@ def analyze_audio_quality(audio: np.ndarray, sr: int) -> dict:
 
 
 def append_benchmark_event(events_file: Path, event: dict) -> None:
-    """Atomically append a benchmark measurement event to the JSONL log."""
+    """Atomically append a benchmark measurement event to the JSONL log with fsync."""
     events_file.parent.mkdir(parents=True, exist_ok=True)
     with open(events_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
         f.flush()
+        os.fsync(f.fileno())
 
 
 class BaseModelRunner:
@@ -223,6 +224,7 @@ class Qwen3Runner(BaseModelRunner):
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
 
         t0 = time.perf_counter()
 
@@ -258,6 +260,8 @@ class Qwen3Runner(BaseModelRunner):
                 text=text,
                 language="italian",
             )
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         gen_time = time.perf_counter() - t0
         vram_info = check_cuda_vram()
         return np.array(wavs[0], dtype=np.float32), sr, gen_time, vram_info
@@ -735,6 +739,7 @@ def run_benchmark(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Italian TTS Benchmark")
+    parser.add_argument("--session-id", default=None, help="Optional session ID to isolate M1 benchmark runs in bench/sessions/<session_id>")
     parser.add_argument("--manifest", default="bench/manifest.csv")
     parser.add_argument("--output-dir", default="bench/outputs")
     parser.add_argument("--results-csv", default="bench/results_benchmark.csv")
@@ -748,6 +753,18 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tests")
     parser.add_argument("--models", nargs="+", default=None, help="Filter specific model IDs (e.g. M-QWEN-0.6B)")
     args = parser.parse_args()
+
+    if args.session_id:
+        session_dir = Path("bench/sessions") / args.session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        if args.results_csv == "bench/results_benchmark.csv":
+            args.results_csv = str(session_dir / "results_benchmark.csv")
+        if args.summary_json == "bench/summary_metrics.json":
+            args.summary_json = str(session_dir / "summary_metrics.json")
+        if args.events_jsonl == "bench/benchmark_events.jsonl":
+            args.events_jsonl = str(session_dir / "benchmark_events.jsonl")
+        if args.output_dir == "bench/outputs":
+            args.output_dir = str(session_dir / "outputs")
 
     run_benchmark(
         manifest_path=args.manifest,
