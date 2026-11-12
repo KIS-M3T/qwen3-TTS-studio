@@ -68,8 +68,10 @@ def analyze_acoustic_quality(audio: np.ndarray, sr: int) -> Dict[str, Any]:
       - peak_dbfs: 20 * log10(max(|sample|)). 0.0 dBFS is digital full scale.
       - rms_dbfs: 20 * log10(sqrt(mean(sample^2))). Overall energy.
       - crest_factor_db: 20 * log10(peak_linear / max(rms_linear, 1e-6)). Peak-to-average ratio.
-      - dynamic_range_db: Difference between peak_dbfs and background noise floor (from quietest
-        100ms segments). Measures usable dynamic span, distinct from crest factor.
+      - dynamic_range_db: Difference between peak_dbfs and background noise floor, estimated
+        via the 5th percentile of 100ms window RMS energy (noise_floor_linear = percentile(window_rms, 5)).
+        Measures usable dynamic span, distinct from crest factor. NOTE: This is an unweighted empirical
+        energy span estimate, NOT a standardized ITU-R 468 or A-weighted SNR measurement.
       - is_clipped: True if peak_linear >= 0.999.
     """
     if len(audio) == 0:

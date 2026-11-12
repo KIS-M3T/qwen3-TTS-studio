@@ -3,8 +3,9 @@
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import re
 import statistics
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import uuid
 
 from src.instrumentation.manifest import get_environment_manifest
@@ -59,13 +60,24 @@ class BenchmarkSession:
 
     def __init__(self, session_id: Optional[str] = None, base_dir: Optional[Path] = None):
         if session_id:
+            # H4: Sanitize session_id against directory traversal and invalid characters
+            if not re.match(r"^[a-zA-Z0-9_\-]+$", session_id):
+                raise ValueError(
+                    f"Invalid session_id: '{session_id}'. Must contain only alphanumeric characters, dashes, and underscores."
+                )
             self.session_id = session_id
         else:
             now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             self.session_id = f"session_{now_str}_{uuid.uuid4().hex[:6]}"
 
-        root_bench = base_dir or Path("bench/sessions")
-        self.session_dir = root_bench / self.session_id
+        root_bench = (base_dir or Path("bench/sessions")).resolve()
+        candidate = (root_bench / self.session_id).resolve()
+        try:
+            candidate.relative_to(root_bench)
+        except ValueError:
+            raise ValueError(f"Path traversal detected in session_id: {session_id}")
+
+        self.session_dir = candidate
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
         self.wav_dir = self.session_dir / "wav_samples"
@@ -76,9 +88,21 @@ class BenchmarkSession:
         self.summary_file = self.session_dir / "summary_metrics.json"
         self.manifest_file = self.session_dir / "environment_manifest.json"
 
+        # Load existing run_ids to reject duplicate runs (H4)
+        self._recorded_run_ids: Set[str] = set()
+        if self.events_file.exists():
+            for ev in read_benchmark_events(self.events_file):
+                if "run_id" in ev:
+                    self._recorded_run_ids.add(ev["run_id"])
+
         # Write canonical environment manifest upon initialization
         self.manifest = get_environment_manifest()
         write_atomic_json(self.manifest_file, self.manifest)
+
+    def get_wav_path_for_run(self, model_id: str, test_case_id: str, iteration_index: int) -> Path:
+        """Return a deterministic, collision-free WAV path within this session's wav directory (H4)."""
+        clean_model = model_id.replace("/", "_").replace("\\", "_")
+        return self.wav_dir / f"{clean_model}_{test_case_id}_iter{iteration_index}.wav"
 
     def record_run(
         self,
@@ -110,9 +134,18 @@ class BenchmarkSession:
         config_sha256: Optional[str] = None,
         weights_sha256: Optional[str] = None,
         error_message: Optional[str] = None,
+        allow_overwrite: bool = False,
     ) -> Dict[str, Any]:
-        """Validate and append a single per-run record with complete metadata (G4)."""
+        """Validate and append a single per-run record with complete metadata (G4, H4)."""
         run_id = f"{self.session_id}_{model_id}_{test_case_id}_iter{iteration_index}"
+
+        # H4: Prevent duplicate run_id collisions within session
+        if run_id in self._recorded_run_ids and not allow_overwrite:
+            raise ValueError(
+                f"Duplicate run_id '{run_id}' in session '{self.session_id}'. "
+                f"Run ID collisions and overwrites are rejected to preserve benchmark audit integrity (H4)."
+            )
+        self._recorded_run_ids.add(run_id)
 
         # Calculate RTF only if empirically measured and duration > 0
         rtf: Optional[float] = None

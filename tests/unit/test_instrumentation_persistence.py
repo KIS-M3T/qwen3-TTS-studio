@@ -206,3 +206,41 @@ def test_m0_artifacts_untouched():
             s = BenchmarkSession(session_id="dummy_test", base_dir=Path(tmpdir))
             s.record_run("0.6B-Base", "TEST_01", 1, "text")
         assert m0_events.stat().st_mtime == initial_mtime
+
+
+def test_benchmark_duplicate_run_id_rejected():
+    """H4: Verify that duplicate run_id within the same session raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session = BenchmarkSession(session_id="collision_test", base_dir=Path(tmpdir))
+        session.record_run(model_id="0.6B-Base", test_case_id="NUM_01", iteration_index=1, input_text_raw="test")
+
+        # Second record with exact same run_id must raise ValueError
+        with pytest.raises(ValueError, match="Duplicate run_id"):
+            session.record_run(model_id="0.6B-Base", test_case_id="NUM_01", iteration_index=1, input_text_raw="test2")
+
+
+def test_benchmark_session_path_traversal_rejected():
+    """H4: Verify that malicious session_id with path traversal or invalid characters is rejected."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        with pytest.raises(ValueError, match="Invalid session_id"):
+            BenchmarkSession(session_id="../escape_session", base_dir=base)
+
+        with pytest.raises(ValueError, match="Invalid session_id"):
+            BenchmarkSession(session_id="session with spaces!", base_dir=base)
+
+
+def test_benchmark_get_wav_path_for_run():
+    """H4: Verify deterministic, non-colliding WAV paths inside session's wav directory."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session = BenchmarkSession(session_id="wav_path_test", base_dir=Path(tmpdir))
+        p1 = session.get_wav_path_for_run("0.6B-Base", "NUM_01", 1)
+        p2 = session.get_wav_path_for_run("0.6B-Base", "NUM_01", 2)
+        p3 = session.get_wav_path_for_run("1.7B-Base", "NUM_01", 1)
+
+        assert p1.name == "0.6B-Base_NUM_01_iter1.wav"
+        assert p2.name == "0.6B-Base_NUM_01_iter2.wav"
+        assert p3.name == "1.7B-Base_NUM_01_iter1.wav"
+        assert p1 != p2
+        assert p1 != p3
+        assert p1.parent == session.wav_dir

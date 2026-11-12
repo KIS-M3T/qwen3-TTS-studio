@@ -123,9 +123,8 @@ def run_profiling(
                         params=dec_params,
                     )
 
-                    # Save WAV and compute SHA-256 (G4, G6)
-                    wav_filename = f"{case_id}_{model_id}_iter{it}.wav"
-                    wav_out_path = session.session_dir / wav_filename
+                    # Save WAV and compute SHA-256 (G4, G6, H4)
+                    wav_out_path = session.get_wav_path_for_run(model_id, case_id, it)
                     t_save_0 = time.perf_counter()
                     sf.write(str(wav_out_path), res.audio.samples, res.audio.sample_rate)
                     save_time_sec = time.perf_counter() - t_save_0
