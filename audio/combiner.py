@@ -3,8 +3,12 @@
 import logging
 from pathlib import Path
 
-from moviepy.audio.io.AudioFileClip import AudioFileClip
-from moviepy.audio.AudioClip import concatenate_audioclips
+try:
+    from moviepy.audio.io.AudioFileClip import AudioFileClip
+    from moviepy.audio.AudioClip import concatenate_audioclips
+except ImportError:
+    AudioFileClip = None
+    concatenate_audioclips = None
 
 # Configure logging
 logging.basicConfig(

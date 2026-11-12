@@ -342,6 +342,17 @@ MULTISAMPLE_CSS = """
 """
 
 from audio.model_loader import MODEL_PATHS, get_model, loaded_models, _gpu_cleanup
+from src.engine.facade import TTSEngineFacade
+from src.engine.types import DecodingParams, VoicePrompt
+
+_ui_engine_facade = None
+
+def get_engine_facade() -> TTSEngineFacade:
+    """Obtain or initialize the global TTSEngineFacade for UI generation (H3)."""
+    global _ui_engine_facade
+    if _ui_engine_facade is None:
+        _ui_engine_facade = TTSEngineFacade()
+    return _ui_engine_facade
 from audio.embedding_utils import (
     AudioSampleInfo,
     analyze_audio_samples,
@@ -1474,30 +1485,40 @@ def generate_custom_voice(
 
     wavs = None
     try:
-        progress(0.1, desc="Loading model...")
-        model = get_model(model_name)
-        load_time = time.time() - start_time
+        progress(0.1, desc="Loading model via Engine Facade...")
+        facade = get_engine_facade()
+
+        dec_params = DecodingParams(
+            temperature=float(temperature),
+            top_p=float(top_p),
+            top_k=int(top_k),
+            repetition_penalty=float(repetition_penalty),
+            max_new_tokens=int(auto_max_tokens),
+            subtalker_params={
+                "subtalker_temperature": float(sub_temp),
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": float(sub_top_p),
+                "instruct": instruct if instruct and instruct.strip() else None,
+                "non_streaming_mode": True,
+            },
+        )
 
         progress(
             0.2,
-            desc=f"Model loaded ({load_time:.1f}s). Generating ~{est_time:.0f}s for {char_count} chars (max {auto_max_tokens} tokens)...",
+            desc=f"Generating ~{est_time:.0f}s for {char_count} chars (max {auto_max_tokens} tokens)...",
         )
 
-        wavs, sr = model.generate_custom_voice(
+        gen_res = facade.synthesize(
             text=text,
-            speaker=speaker,
+            model_id=model_name,
+            mode="custom",
             language=language,
-            instruct=instruct if instruct and instruct.strip() else None,
-            non_streaming_mode=True,
-            temperature=temperature,
-            top_k=int(top_k),
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            max_new_tokens=auto_max_tokens,
-            subtalker_temperature=sub_temp,
-            subtalker_top_k=int(sub_top_k),
-            subtalker_top_p=sub_top_p,
+            speaker_id=speaker,
+            params=dec_params,
         )
+
+        wavs = [gen_res.audio.samples]
+        sr = gen_res.audio.sample_rate
 
         gen_time = time.time() - start_time
 
@@ -1742,8 +1763,10 @@ def clone_voice_multi(
     voice_clone_prompt = None
 
     try:
-        progress(0.1, desc="Loading model...")
-        model = get_model(model_name)
+        progress(0.1, desc="Loading model via Engine Facade...")
+        facade = get_engine_facade()
+        adapter = facade.get_or_load_adapter(model_name)
+        model = adapter.model
         load_time = time.time() - start_time
 
         progress(
@@ -1809,20 +1832,36 @@ def clone_voice_multi(
             est_time = max(10, char_count * 0.15)
             progress(0.4, desc=f"Generating ~{est_time:.0f}s for {char_count} chars...")
 
-            wavs, sr = model.generate_voice_clone(
-                text=test_text,
-                language=language,
-                voice_clone_prompt=runtime_prompt,
-                non_streaming_mode=True,
-                temperature=temperature,
+            dec_params = DecodingParams(
+                temperature=float(temperature),
+                top_p=float(top_p),
                 top_k=int(top_k),
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                max_new_tokens=auto_max_tokens,
-                subtalker_temperature=sub_temp,
-                subtalker_top_k=int(sub_top_k),
-                subtalker_top_p=sub_top_p,
+                repetition_penalty=float(repetition_penalty),
+                max_new_tokens=int(auto_max_tokens),
+                subtalker_params={
+                    "subtalker_temperature": float(sub_temp),
+                    "subtalker_top_k": int(sub_top_k),
+                    "subtalker_top_p": float(sub_top_p),
+                    "non_streaming_mode": True,
+                },
             )
+            vp = VoicePrompt(
+                voice_id="runtime_clone",
+                ref_audio_path=Path(primary_info.path) if primary_info and getattr(primary_info, "path", None) else None,
+                ref_transcript=getattr(primary_info, "transcript", None) if primary_info else None,
+                x_vector_only=bool(runtime_xvector_only),
+                raw_prompt_payload=runtime_prompt,
+            )
+            gen_res = facade.synthesize(
+                text=test_text,
+                model_id=model_name,
+                mode="clone",
+                language=language,
+                voice_prompt=vp,
+                params=dec_params,
+            )
+            wavs = [gen_res.audio.samples]
+            sr = gen_res.audio.sample_rate
 
             gen_time = time.time() - start_time
             progress(0.9, desc=f"Saving audio ({gen_time:.1f}s)...")
@@ -2096,6 +2135,8 @@ def save_cloned_voice_multi(
         ref_script = _guess_script_language(primary_transcript)
 
         metadata = {
+            "schema_version": "1.0",
+            "format": "safetensors",
             "name": voice_name,
             "description": description,
             "style_note": style_note,
@@ -2108,6 +2149,7 @@ def save_cloned_voice_multi(
             "created": datetime.now().isoformat(),
             "multi_sample": True,
             "num_samples": len(saved_ref_paths),
+            "prompt_items": samples_meta,
             "samples": samples_meta,
             "ref_audio_paths": saved_ref_paths,
         }
@@ -2249,7 +2291,7 @@ def generate_with_saved_voice(
 
         from src.engine.prompt_manager import load_voice_prompt_items
         try:
-            voice_clone_prompt = load_voice_prompt_items(voice_dir)
+            voice_clone_prompt = load_voice_prompt_items(voice_dir, base_dir=SAVED_VOICES_DIR)
         except Exception as load_err:
             raise gr.Error(f"Failed to load voice '{saved_voice_id}': {load_err}")
 
@@ -2286,29 +2328,39 @@ def generate_with_saved_voice(
             if runtime_xvector_only:
                 runtime_prompt = _make_xvector_only_prompt(voice_clone_prompt)
 
-        progress(0.1, desc=f"Loading {model_name}...")
-        model = get_model(model_name)
-        load_time = time.time() - start_time
+        progress(0.1, desc=f"Loading {model_name} via Engine Facade...")
+        facade = get_engine_facade()
 
-        progress(
-            0.2,
-            desc=f"Model loaded ({load_time:.1f}s). Generating ~{est_time:.0f}s for {char_count} chars (max {auto_max_tokens} tokens)...",
-        )
-
-        wavs, sr = model.generate_voice_clone(
-            text=text,
-            language=language,
-            voice_clone_prompt=runtime_prompt,
-            non_streaming_mode=True,
-            temperature=temperature,
+        dec_params = DecodingParams(
+            temperature=float(temperature),
+            top_p=float(top_p),
             top_k=int(top_k),
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            max_new_tokens=auto_max_tokens,
-            subtalker_temperature=sub_temp,
-            subtalker_top_k=int(sub_top_k),
-            subtalker_top_p=sub_top_p,
+            repetition_penalty=float(repetition_penalty),
+            max_new_tokens=int(auto_max_tokens),
+            subtalker_params={
+                "subtalker_temperature": float(sub_temp),
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": float(sub_top_p),
+                "non_streaming_mode": True,
+            },
         )
+        vp = VoicePrompt(
+            voice_id=saved_voice_id,
+            ref_audio_path=None,
+            ref_transcript=meta.get("ref_text"),
+            x_vector_only=bool(runtime_xvector_only),
+            raw_prompt_payload=runtime_prompt,
+        )
+        gen_res = facade.synthesize(
+            text=text,
+            model_id=model_name,
+            mode="clone",
+            language=language,
+            voice_prompt=vp,
+            params=dec_params,
+        )
+        wavs = [gen_res.audio.samples]
+        sr = gen_res.audio.sample_rate
 
         gen_time = time.time() - start_time
 
