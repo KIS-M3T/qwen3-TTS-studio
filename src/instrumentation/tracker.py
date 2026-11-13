@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import statistics
 import subprocess
+import sys
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
@@ -74,6 +75,42 @@ PER_RUN_CSV_FIELDNAMES = [
     "wav_sha256",
     "timestamp_utc",
 ]
+
+
+def atomic_publish_file_no_clobber(src_path: Path, dst_path: Path) -> None:
+    """Atomically publish a file from src to dst without clobbering an existing dst (K1).
+
+    Platform behavior:
+    - Windows (win32): os.rename() natively fails with FileExistsError (WinError 183) if dst exists.
+    - POSIX (Linux/macOS): os.link() creates a hard link atomically (failing with FileExistsError
+      if dst exists), followed by os.unlink(src). If hard links are unsupported, an explicit check
+      and atomic file creation guard prevents silent overwriting.
+
+    Note on transactional boundary:
+    WAV publication is atomic and exclusive at the filesystem layer. Benchmark event logging
+    is separately protected by atomic fsync. Cross-resource multi-file transactions (WAV + JSONL)
+    are not supported by standard operating system filesystems; if an interruption occurs between
+    WAV publication and JSONL logging, the WAV remains on disk and subsequent runs with identical
+    identifiers will be rejected to preserve data immutability.
+    """
+    if dst_path.exists():
+        raise FileExistsError(f"Destination file already exists at '{dst_path}'. Overwrite rejected (K1).")
+
+    if sys.platform == "win32":
+        # Windows: os.rename fails with FileExistsError if dst exists
+        os.rename(str(src_path), str(dst_path))
+    else:
+        # POSIX: os.link is atomic and raises FileExistsError if dst exists
+        try:
+            os.link(str(src_path), str(dst_path))
+            os.unlink(str(src_path))
+        except FileExistsError:
+            raise FileExistsError(f"Destination file already exists at '{dst_path}'. Overwrite rejected (K1).")
+        except OSError as e:
+            # Fallback if filesystem does not support hard links
+            if dst_path.exists():
+                raise FileExistsError(f"Destination file already exists at '{dst_path}'. Overwrite rejected (K1).") from e
+            raise RuntimeError(f"Atomic no-clobber publication failed on {sys.platform}: {e}") from e
 
 
 class BenchmarkSession:
@@ -180,8 +217,8 @@ class BenchmarkSession:
                     h.update(chunk)
             wav_sha256 = h.hexdigest()
 
-            # Atomic exclusive publication: os.rename raises FileExistsError on Windows if target_wav exists
-            os.rename(str(tmp_wav), str(target_wav))
+            # Atomic exclusive publication (no-clobber across supported platforms, K1)
+            atomic_publish_file_no_clobber(tmp_wav, target_wav)
         finally:
             if tmp_wav.exists():
                 try:
@@ -297,58 +334,6 @@ class BenchmarkSession:
         # J1: Atomic append; only mark run_id as recorded AFTER persistence succeeds
         append_benchmark_event(self.events_file, event)
         self._recorded_run_ids.add(run_id)
-        return event
-
-        # Calculate RTF only if empirically measured and duration > 0
-        rtf: Optional[float] = None
-        if measured and inference_time_sec is not None and audio_duration_sec and audio_duration_sec > 0:
-            rtf = round(inference_time_sec / audio_duration_sec, 4)
-
-        mem = memory_snapshot or get_memory_snapshot()
-
-        # If baseline_process_mb is not provided, use snapshot if present, else None (null in JSON)
-        proc_baseline = baseline_process_mb if baseline_process_mb is not None else mem.get("baseline_process_mb")
-
-        event: Dict[str, Any] = {
-            "session_id": self.session_id,
-            "run_id": run_id,
-            "model_id": model_id,
-            "checkpoint_revision": checkpoint_revision or "unknown",
-            "config_sha256": config_sha256,
-            "weights_sha256": weights_sha256,
-            "test_case_id": test_case_id,
-            "iteration_index": iteration_index,
-            "run_type": run_type,
-            "status": status,
-            "measured": measured,
-            "seed": seed,
-            "temperature": temperature,
-            "top_p": top_p,
-            "top_k": top_k,
-            "repetition_penalty": repetition_penalty,
-            "min_new_tokens": min_new_tokens,
-            "max_new_tokens": max_new_tokens,
-            "subtalker_params": subtalker_params or {},
-            "applied_params": applied_params or {},
-            "input_text_raw": input_text_raw,
-            "audio_duration_sec": round(audio_duration_sec, 4) if audio_duration_sec is not None else None,
-            "inference_time_sec": round(inference_time_sec, 4) if inference_time_sec is not None else None,
-            "rtf": rtf,
-            "prep_time_sec": round(prep_time_sec, 4) if prep_time_sec is not None else None,
-            "save_time_sec": round(save_time_sec, 4) if save_time_sec is not None else None,
-            "torch_allocated_mb": mem.get("torch_allocated_mb", 0.0),
-            "torch_reserved_mb": mem.get("torch_reserved_mb", 0.0),
-            "torch_peak_allocated_mb": mem.get("torch_peak_allocated_mb", 0.0),
-            "driver_used_mb_at_end": mem.get("driver_used_mb_at_end"),
-            "baseline_process_mb": proc_baseline,
-            "wav_path": str(wav_path) if wav_path else None,
-            "wav_sha256": wav_sha256,
-            "error_message": error_message,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # Thread-safe fsync append
-        append_benchmark_event(self.events_file, event)
         return event
 
     def generate_reports(self) -> Dict[str, Any]:

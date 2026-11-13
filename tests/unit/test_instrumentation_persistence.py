@@ -326,3 +326,48 @@ def test_j1_authorized_resume_preserves_manifest():
         # Authorized resume
         s2 = BenchmarkSession(session_id="resume_session", base_dir=base, resume=True)
         assert s2.manifest_file.read_text(encoding="utf-8") == '{"custom_manifest": true}'
+
+
+def test_k1_atomic_no_clobber_publication_preserves_initial_wav():
+    """K1 Mandatory test: Demonstrate that an existing WAV does NOT change after a concurrent/second publication attempt."""
+    from src.instrumentation.tracker import atomic_publish_file_no_clobber
+    import hashlib
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        target = root / "legitimate_sample.wav"
+        original_bytes = b"RIFF_ORIGINAL_NEURAL_AUDIO_PAYLOAD_12345678"
+        target.write_bytes(original_bytes)
+        initial_sha = hashlib.sha256(original_bytes).hexdigest()
+
+        # Concurrent/rogue worker tries to publish a malicious WAV with the same target path
+        rogue_tmp = root / ".tmp_rogue_audio.wav"
+        rogue_bytes = b"CORRUPTED_OVERWRITE_ATTEMPT_99999999999999"
+        rogue_tmp.write_bytes(rogue_bytes)
+
+        # Atomic no-clobber publication must reject the overwrite
+        with pytest.raises(FileExistsError, match="(already exists|Overwrite rejected)"):
+            atomic_publish_file_no_clobber(rogue_tmp, target)
+
+        # Invariant: Target file MUST remain 100% untouched
+        assert target.read_bytes() == original_bytes
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == initial_sha
+
+
+def test_k1_atomic_no_clobber_posix_branch_emulation():
+    """K1: Emulate POSIX hardlink branch of atomic_publish_file_no_clobber to verify platform consistency."""
+    from src.instrumentation.tracker import atomic_publish_file_no_clobber
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        target = root / "posix_target.wav"
+        target.write_bytes(b"EXISTING_DATA")
+
+        rogue = root / ".tmp_posix.wav"
+        rogue.write_bytes(b"ROGUE_DATA")
+
+        with patch("sys.platform", "linux"):
+            with pytest.raises(FileExistsError):
+                atomic_publish_file_no_clobber(rogue, target)
+        assert target.read_bytes() == b"EXISTING_DATA"
