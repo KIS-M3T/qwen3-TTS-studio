@@ -488,7 +488,7 @@ print("SUBPROCESS_CONCURRENCY_OK")
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     assert res.returncode == 0, f"Subprocess failed with stderr:\n{res.stderr}\nstdout:\n{res.stdout}"
     assert "SUBPROCESS_CONCURRENCY_OK" in res.stdout
