@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import torch
 
-from src.engine.errors import SecurityError
+from src.engine.errors import PromptValidationError, SecurityError
 from src.engine.types import VoicePrompt
 
 logger = logging.getLogger(__name__)
@@ -214,7 +214,7 @@ def _save_dict_prompt(
 
 
 def save_prompt_to_safetensors_file(items: Any, filepath: Path) -> None:
-    """Save prompt items directly to a single safetensors file with embedded JSON header (G2)."""
+    """Save prompt items directly to a single safetensors file with embedded JSON header (G2, J3)."""
     from qwen_tts.inference.qwen3_tts_model import VoiceClonePromptItem
     from safetensors.torch import save_file
 
@@ -228,7 +228,11 @@ def save_prompt_to_safetensors_file(items: Any, filepath: Path) -> None:
             for k, v in items.items()
             if hasattr(v, "detach")
         }
-        save_file(clean_tensors, str(filepath))
+        header_meta = {
+            "schema_version": "1.0",
+            "format": "safetensors_dict",
+        }
+        save_file(clean_tensors, str(filepath), metadata=header_meta)
         return
     else:
         raise ValueError(f"Unsupported prompt items type: {type(items)}")
@@ -266,10 +270,11 @@ def load_voice_prompt_items(
     voice_dir: Path,
     base_dir: Path = DEFAULT_SAVED_VOICES_DIR,
 ) -> List[Any]:
-    """Load VoiceClonePromptItem list reconstructed from safetensors (G2, H2).
+    """Load VoiceClonePromptItem list reconstructed from safetensors (G2, H2, J3).
 
     Strictly rejects arbitrary pickle deserialization in runtime paths.
-    Tolerantly reconciles engine and UI schema differences without KeyError.
+    Enforces strict schema validation on safetensors headers, companion metadata,
+    tensor shapes, and dtypes.
 
     Args:
         voice_dir: Directory containing voice prompt.
@@ -279,7 +284,8 @@ def load_voice_prompt_items(
         List[VoiceClonePromptItem]: Reconstructed native vendor prompt items.
 
     Raises:
-        SecurityError: If untrusted legacy pickle is encountered.
+        SecurityError: If untrusted legacy pickle or path traversal is encountered.
+        PromptValidationError: If schema, metadata, tensor keys, shapes, or dtypes are invalid.
         FileNotFoundError: If prompt files do not exist.
     """
     safe_dir = validate_voice_directory(voice_dir, base_dir)
@@ -293,31 +299,89 @@ def load_voice_prompt_items(
         from safetensors import safe_open
         from qwen_tts.inference.qwen3_tts_model import VoiceClonePromptItem
 
-        tensors = load_file(str(safetensors_path))
-
-        # 1. Read safetensors header metadata if available (G2)
+        # 1. Read and validate safetensors header metadata (G2, J3)
         header_samples: Optional[List[Dict[str, Any]]] = None
+        declared_sample_count: Optional[int] = None
         try:
             with safe_open(str(safetensors_path), framework="pt") as sf:
                 header_meta = sf.metadata()
-                if header_meta and "samples_json" in header_meta:
-                    header_samples = json.loads(header_meta["samples_json"])
+                if header_meta:
+                    if "num_samples" in header_meta:
+                        try:
+                            declared_sample_count = int(header_meta["num_samples"])
+                        except (ValueError, TypeError) as ve:
+                            raise PromptValidationError(
+                                f"Invalid num_samples '{header_meta.get('num_samples')}' in safetensors header: {ve}"
+                            ) from ve
+                    if "samples_json" in header_meta:
+                        try:
+                            header_samples = json.loads(header_meta["samples_json"])
+                            if not isinstance(header_samples, list):
+                                raise PromptValidationError(
+                                    f"samples_json in header must be a list, got {type(header_samples)}"
+                                )
+                        except json.JSONDecodeError as jde:
+                            raise PromptValidationError(
+                                f"Corrupted samples_json in safetensors header in {safetensors_path}: {jde}"
+                            ) from jde
+        except PromptValidationError:
+            raise
         except Exception as e:
-            logger.debug(f"Could not read safetensors header metadata: {e}")
+            raise PromptValidationError(
+                f"Failed to open or parse safetensors header in {safetensors_path}: {e}"
+            ) from e
 
-        # 2. Read companion metadata.json
+        tensors = load_file(str(safetensors_path))
+
+        # 2. Read and validate companion metadata.json (J3)
+        metadata: Dict[str, Any] = {}
         if metadata_path.exists():
             try:
                 with open(metadata_path, "r", encoding="utf-8") as f:
                     metadata = json.load(f)
+                if not isinstance(metadata, dict):
+                    raise PromptValidationError(
+                        f"metadata.json must contain a JSON object, got {type(metadata)}"
+                    )
+            except json.JSONDecodeError as jde:
+                raise PromptValidationError(
+                    f"Corrupted metadata.json in {safe_dir}: {jde}"
+                ) from jde
+            except PromptValidationError:
+                raise
             except Exception as e:
-                logger.warning(f"Failed to read metadata.json in {safe_dir}: {e}")
-                metadata = {}
-        else:
-            metadata = {}
+                raise PromptValidationError(
+                    f"Failed to read metadata.json in {safe_dir}: {e}"
+                ) from e
 
-        # 3. Determine samples specification (H2)
-        # Priority order: header_samples -> metadata["prompt_items"] -> metadata["samples"]
+        if declared_sample_count is None and "num_samples" in metadata:
+            try:
+                declared_sample_count = int(metadata["num_samples"])
+            except (ValueError, TypeError) as ve:
+                raise PromptValidationError(
+                    f"Invalid num_samples in metadata.json: {metadata['num_samples']}"
+                ) from ve
+
+        def validate_spk_embedding(spk_tensor: Any, sample_idx: int) -> torch.Tensor:
+            if spk_tensor is None:
+                raise PromptValidationError(
+                    f"Missing speaker embedding tensor for sample {sample_idx} in {safe_dir}"
+                )
+            if not isinstance(spk_tensor, torch.Tensor):
+                raise PromptValidationError(
+                    f"Speaker embedding for sample {sample_idx} must be a torch.Tensor, got {type(spk_tensor)}"
+                )
+            if spk_tensor.ndim not in (1, 2):
+                raise PromptValidationError(
+                    f"Invalid speaker embedding shape {spk_tensor.shape} for sample {sample_idx}; expected 1D or 2D"
+                )
+            if not spk_tensor.is_floating_point():
+                raise PromptValidationError(
+                    f"Invalid speaker embedding dtype {spk_tensor.dtype} for sample {sample_idx}; expected floating point"
+                )
+            return spk_tensor
+
+        # 3. Determine samples specification (H2, J3)
         raw_samples = header_samples
         if not raw_samples:
             raw_samples = metadata.get("prompt_items") or metadata.get("prompt_metadata") or metadata.get("samples")
@@ -326,7 +390,9 @@ def load_voice_prompt_items(
             items: List[VoiceClonePromptItem] = []
             for i, s_info in enumerate(raw_samples):
                 if not isinstance(s_info, dict):
-                    continue
+                    raise PromptValidationError(
+                        f"Sample info for entry {i} must be a dict, got {type(s_info)}"
+                    )
 
                 idx = s_info.get("index", i)
 
@@ -337,9 +403,7 @@ def load_voice_prompt_items(
                 if spk_emb is None and i == 0:
                     spk_emb = tensors.get("ref_spk_embedding")
 
-                if spk_emb is None:
-                    logger.warning(f"Missing speaker embedding for sample {i} (index={idx}) in {safe_dir}")
-                    continue
+                spk_emb = validate_spk_embedding(spk_emb, i)
 
                 # Find ref code tensor
                 has_code_decl = s_info.get("has_ref_code")
@@ -351,6 +415,11 @@ def load_voice_prompt_items(
 
                 if has_code_decl is False:
                     ref_code = None
+
+                if ref_code is not None and not isinstance(ref_code, torch.Tensor):
+                    raise PromptValidationError(
+                        f"Ref code for sample {i} must be a torch.Tensor, got {type(ref_code)}"
+                    )
 
                 # Reconcile text
                 ref_txt = (
@@ -381,19 +450,30 @@ def load_voice_prompt_items(
                     )
                 )
 
-            if items:
-                return items
+            if declared_sample_count is not None and len(items) != declared_sample_count:
+                raise PromptValidationError(
+                    f"Sample count mismatch in {safe_dir}: declared {declared_sample_count}, reconstructed {len(items)}"
+                )
 
-        # 4. Fallback: discover samples directly from tensor keys if no sample list or if parsing failed
+            if not items:
+                raise PromptValidationError(f"No valid voice clone prompt items found in {safe_dir}")
+
+            return items
+
+        # 4. Fallback: discover samples directly from tensor keys if no sample list
         discovered_items: List[VoiceClonePromptItem] = []
         i = 0
         while True:
             spk_key = f"sample_{i}_ref_spk_embedding"
             if spk_key not in tensors:
                 break
-            spk_emb = tensors[spk_key]
+            spk_emb = validate_spk_embedding(tensors[spk_key], i)
             code_key = f"sample_{i}_ref_code"
             ref_code = tensors.get(code_key)
+            if ref_code is not None and not isinstance(ref_code, torch.Tensor):
+                raise PromptValidationError(
+                    f"Ref code for sample {i} must be a torch.Tensor, got {type(ref_code)}"
+                )
             discovered_items.append(
                 VoiceClonePromptItem(
                     ref_code=ref_code,
@@ -406,6 +486,10 @@ def load_voice_prompt_items(
             i += 1
 
         if discovered_items:
+            if declared_sample_count is not None and len(discovered_items) != declared_sample_count:
+                raise PromptValidationError(
+                    f"Sample count mismatch in {safe_dir}: declared {declared_sample_count}, reconstructed {len(discovered_items)}"
+                )
             return discovered_items
 
         # 5. Fallback for single flat tensor dictionary
@@ -413,10 +497,15 @@ def load_voice_prompt_items(
             spk_emb = tensors.get("sample_0_ref_spk_embedding")
             if spk_emb is None:
                 spk_emb = tensors.get("ref_spk_embedding")
+            spk_emb = validate_spk_embedding(spk_emb, 0)
             ref_code = tensors.get("sample_0_ref_code")
             if ref_code is None:
                 ref_code = tensors.get("ref_code")
-            return [
+            if ref_code is not None and not isinstance(ref_code, torch.Tensor):
+                raise PromptValidationError(
+                    f"Ref code must be a torch.Tensor, got {type(ref_code)}"
+                )
+            items = [
                 VoiceClonePromptItem(
                     ref_code=ref_code,
                     ref_spk_embedding=spk_emb,
@@ -425,8 +514,15 @@ def load_voice_prompt_items(
                     ref_text=metadata.get("ref_text") or metadata.get("ref_transcript"),
                 )
             ]
+            if declared_sample_count is not None and len(items) != declared_sample_count:
+                raise PromptValidationError(
+                    f"Sample count mismatch in {safe_dir}: declared {declared_sample_count}, reconstructed {len(items)}"
+                )
+            return items
 
-        return tensors  # type: ignore
+        raise PromptValidationError(
+            f"No valid voice clone prompt items could be reconstructed from {safe_dir}. Safetensors lacks required embeddings."
+        )
 
     if legacy_pkl_path.exists():
         raise SecurityError(

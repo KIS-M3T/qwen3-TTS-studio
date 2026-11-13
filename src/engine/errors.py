@@ -34,3 +34,7 @@ class SecurityError(TTSEngineError):
 
 class ConfigurationError(TTSEngineError):
     """Incompatible engine or generation configuration."""
+
+
+class PromptValidationError(TTSEngineError):
+    """Schema violation or corruption in voice prompt safetensors/metadata (J3)."""
