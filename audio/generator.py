@@ -387,21 +387,17 @@ def generate_dialogue_audio(
         model_name = base_model_name
 
     try:
-        from audio.model_loader import get_model
+        from audio.model_loader import lease_model
 
-        model = get_model(model_name)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load model '{model_name}': {e}")
-
-    try:
-        if speaker.type == "preset":
-            wavs, sr = _generate_preset_voice(
-                model, dialogue.text, speaker.voice_id, params
-            )
-        else:
-            wavs, sr = _generate_saved_voice(
-                model, dialogue.text, speaker.voice_id, params
-            )
+        with lease_model(model_name) as model:
+            if speaker.type == "preset":
+                wavs, sr = _generate_preset_voice(
+                    model, dialogue.text, speaker.voice_id, params
+                )
+            else:
+                wavs, sr = _generate_saved_voice(
+                    model, dialogue.text, speaker.voice_id, params
+                )
     except Exception as e:
         raise RuntimeError(f"TTS generation failed for speaker '{speaker.name}': {e}")
 
@@ -535,17 +531,21 @@ def _generate_saved_voice(
         FileNotFoundError: If saved voice not found.
     """
     voice_dir = SAVED_VOICES_DIR / voice_id
+    safetensors_path = voice_dir / "voice_prompt.safetensors"
     prompt_path = voice_dir / "prompt.pkl"
     meta_path = voice_dir / "metadata.json"
 
-    if not prompt_path.exists():
-        raise FileNotFoundError(f"Saved voice not found: {voice_id}")
+    from src.engine.prompt_manager import load_voice_prompt_items
+    try:
+        raw_prompt = load_voice_prompt_items(voice_dir)
+    except Exception as load_err:
+        raise RuntimeError(f"Failed to load saved voice '{voice_id}': {load_err}") from load_err
 
-    with open(meta_path) as f:
-        meta = json.load(f)
-
-    with open(prompt_path, "rb") as f:
-        raw_prompt = pickle.load(f)
+    if meta_path.exists():
+        with open(meta_path) as f:
+            meta = json.load(f)
+    else:
+        meta = {}
 
     voice_clone_prompt = _prepare_voice_clone_prompt(raw_prompt, model)
     print(

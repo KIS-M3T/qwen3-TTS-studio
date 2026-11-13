@@ -342,6 +342,20 @@ MULTISAMPLE_CSS = """
 """
 
 from audio.model_loader import MODEL_PATHS, get_model, loaded_models, _gpu_cleanup
+from src.engine.facade import TTSEngineFacade
+from src.engine.types import DecodingParams, VoicePrompt
+
+_ui_engine_facade = None
+_ui_facade_lock = threading.Lock()
+
+def get_engine_facade() -> TTSEngineFacade:
+    """Obtain or initialize the global TTSEngineFacade for UI generation (thread-safe singleton, H3, J2)."""
+    global _ui_engine_facade
+    if _ui_engine_facade is None:
+        with _ui_facade_lock:
+            if _ui_engine_facade is None:
+                _ui_engine_facade = TTSEngineFacade()
+    return _ui_engine_facade
 from audio.embedding_utils import (
     AudioSampleInfo,
     analyze_audio_samples,
@@ -1474,30 +1488,40 @@ def generate_custom_voice(
 
     wavs = None
     try:
-        progress(0.1, desc="Loading model...")
-        model = get_model(model_name)
-        load_time = time.time() - start_time
+        progress(0.1, desc="Loading model via Engine Facade...")
+        facade = get_engine_facade()
+
+        dec_params = DecodingParams(
+            temperature=float(temperature),
+            top_p=float(top_p),
+            top_k=int(top_k),
+            repetition_penalty=float(repetition_penalty),
+            max_new_tokens=int(auto_max_tokens),
+            subtalker_params={
+                "subtalker_temperature": float(sub_temp),
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": float(sub_top_p),
+                "instruct": instruct if instruct and instruct.strip() else None,
+                "non_streaming_mode": True,
+            },
+        )
 
         progress(
             0.2,
-            desc=f"Model loaded ({load_time:.1f}s). Generating ~{est_time:.0f}s for {char_count} chars (max {auto_max_tokens} tokens)...",
+            desc=f"Generating ~{est_time:.0f}s for {char_count} chars (max {auto_max_tokens} tokens)...",
         )
 
-        wavs, sr = model.generate_custom_voice(
+        gen_res = facade.synthesize(
             text=text,
-            speaker=speaker,
+            model_id=model_name,
+            mode="custom",
             language=language,
-            instruct=instruct if instruct and instruct.strip() else None,
-            non_streaming_mode=True,
-            temperature=temperature,
-            top_k=int(top_k),
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            max_new_tokens=auto_max_tokens,
-            subtalker_temperature=sub_temp,
-            subtalker_top_k=int(sub_top_k),
-            subtalker_top_p=sub_top_p,
+            speaker_id=speaker,
+            params=dec_params,
         )
+
+        wavs = [gen_res.audio.samples]
+        sr = gen_res.audio.sample_rate
 
         gen_time = time.time() - start_time
 
@@ -1590,40 +1614,43 @@ def generate_voice_design(
     wavs = None
     try:
         progress(0.1, desc="Loading VoiceDesign model...")
-        model = get_model("1.7B-VoiceDesign")
+        facade = get_engine_facade()
+        with facade._coordinator_lock:
+            facade.unload()
+            model = get_model("1.7B-VoiceDesign")
 
-        if not hasattr(model, "generate_voice_design"):
-            raise gr.Error(
-                "VoiceDesign model doesn't support generate_voice_design(). "
-                "Please ensure you have the correct model downloaded."
+            if not hasattr(model, "generate_voice_design"):
+                raise gr.Error(
+                    "VoiceDesign model doesn't support generate_voice_design(). "
+                    "Please ensure you have the correct model downloaded."
+                )
+
+            load_time = time.time() - start_time
+
+            progress(
+                0.2,
+                desc=f"Model loaded ({load_time:.1f}s). Generating ~{est_time:.0f}s for {char_count} chars...",
             )
 
-        load_time = time.time() - start_time
+            actual_language = language if language and language != "auto" else None
 
-        progress(
-            0.2,
-            desc=f"Model loaded ({load_time:.1f}s). Generating ~{est_time:.0f}s for {char_count} chars...",
-        )
+            gen_kwargs = {
+                "text": text,
+                "instruct": voice_description.strip(),
+                "non_streaming_mode": True,
+                "temperature": temperature,
+                "top_k": int(top_k),
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "max_new_tokens": auto_max_tokens,
+                "subtalker_temperature": sub_temp,
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": sub_top_p,
+            }
+            if actual_language:
+                gen_kwargs["language"] = actual_language
 
-        actual_language = language if language and language != "auto" else None
-
-        gen_kwargs = {
-            "text": text,
-            "instruct": voice_description.strip(),
-            "non_streaming_mode": True,
-            "temperature": temperature,
-            "top_k": int(top_k),
-            "top_p": top_p,
-            "repetition_penalty": repetition_penalty,
-            "max_new_tokens": auto_max_tokens,
-            "subtalker_temperature": sub_temp,
-            "subtalker_top_k": int(sub_top_k),
-            "subtalker_top_p": sub_top_p,
-        }
-        if actual_language:
-            gen_kwargs["language"] = actual_language
-
-        wavs, sr = model.generate_voice_design(**gen_kwargs)
+            wavs, sr = model.generate_voice_design(**gen_kwargs)
 
         # Guard against empty result
         if wavs is None or len(wavs) == 0:
@@ -1742,151 +1769,168 @@ def clone_voice_multi(
     voice_clone_prompt = None
 
     try:
-        progress(0.1, desc="Loading model...")
-        model = get_model(model_name)
-        load_time = time.time() - start_time
+        progress(0.1, desc="Loading model via Engine Facade...")
+        facade = get_engine_facade()
+        with facade.use_adapter(model_name) as adapter:
+            model = adapter.model
+            load_time = time.time() - start_time
 
-        progress(
-            0.2,
-            desc=f"Model loaded ({load_time:.1f}s). Analyzing {len(audio_paths)} sample(s)...",
-        )
-
-        sample_infos = analyze_audio_samples(audio_paths, audio_transcripts)
-
-        if combine_samples and len(sample_infos) > 1:
-            progress(0.3, desc="Combining voice embeddings...")
-            voice_clone_prompt = create_combined_voice_clone_prompt(
-                model=model,
-                sample_infos=sample_infos,
-                x_vector_only_mode=x_vector_only_mode,
-            )
-            primary_info = next(
-                (s for s in sample_infos if s.is_primary), sample_infos[0]
-            )
-        else:
-            primary_info = sample_infos[0]
-            voice_clone_prompt = model.create_voice_clone_prompt(
-                ref_audio=primary_info.path,
-                ref_text=primary_info.transcript,
-                x_vector_only_mode=x_vector_only_mode,
+            progress(
+                0.2,
+                desc=f"Model loaded ({load_time:.1f}s). Analyzing {len(audio_paths)} sample(s)...",
             )
 
-        # Keep the stored prompt as-is, but optionally disable ICL at generation
-        # time for cross-lingual output when ICL is available.
-        runtime_prompt = voice_clone_prompt
-        runtime_xvector_only = bool(x_vector_only_mode)
-        if test_text.strip() and not x_vector_only_mode and bool(crosslingual_opt):
-            ref_texts = [
-                s.transcript for s in sample_infos if getattr(s, "transcript", None)
-            ]
-            if not ref_texts and primary_info is not None:
-                ref_texts = [getattr(primary_info, "transcript", None)]
+            sample_infos = analyze_audio_samples(audio_paths, audio_transcripts)
 
-            try:
-                ref_lang = (ref_language or "").strip().lower()
-                out_lang = (language or "").strip().lower()
-                if ref_lang and ref_lang != "auto" and out_lang and out_lang != "auto":
-                    runtime_xvector_only = ref_lang != out_lang
-                else:
-                    runtime_xvector_only = _should_use_xvector_only_multi(
-                        ref_texts=ref_texts,
-                        out_language=language,
-                        out_text=test_text,
-                    )
-            except Exception:
-                runtime_xvector_only = False
+            if combine_samples and len(sample_infos) > 1:
+                progress(0.3, desc="Combining voice embeddings...")
+                voice_clone_prompt = create_combined_voice_clone_prompt(
+                    model=model,
+                    sample_infos=sample_infos,
+                    x_vector_only_mode=x_vector_only_mode,
+                )
+                primary_info = next(
+                    (s for s in sample_infos if s.is_primary), sample_infos[0]
+                )
+            else:
+                primary_info = sample_infos[0]
+                voice_clone_prompt = model.create_voice_clone_prompt(
+                    ref_audio=primary_info.path,
+                    ref_text=primary_info.transcript,
+                    x_vector_only_mode=x_vector_only_mode,
+                )
 
-            if runtime_xvector_only:
-                runtime_prompt = _make_xvector_only_prompt(voice_clone_prompt)
+            # Keep the stored prompt as-is, but optionally disable ICL at generation
+            # time for cross-lingual output when ICL is available.
+            runtime_prompt = voice_clone_prompt
+            runtime_xvector_only = bool(x_vector_only_mode)
+            if test_text.strip() and not x_vector_only_mode and bool(crosslingual_opt):
+                ref_texts = [
+                    s.transcript for s in sample_infos if getattr(s, "transcript", None)
+                ]
+                if not ref_texts and primary_info is not None:
+                    ref_texts = [getattr(primary_info, "transcript", None)]
 
-        output_audio = None
-        if test_text.strip():
-            if len(test_text) > MAX_CHARS:
-                raise gr.Error(f"Test text too long ({len(test_text)} chars)")
+                try:
+                    ref_lang = (ref_language or "").strip().lower()
+                    out_lang = (language or "").strip().lower()
+                    if ref_lang and ref_lang != "auto" and out_lang and out_lang != "auto":
+                        runtime_xvector_only = ref_lang != out_lang
+                    else:
+                        runtime_xvector_only = _should_use_xvector_only_multi(
+                            ref_texts=ref_texts,
+                            out_language=language,
+                            out_text=test_text,
+                        )
+                except Exception:
+                    runtime_xvector_only = False
 
-            char_count = len(test_text)
-            auto_max_tokens = estimate_max_tokens(test_text)
-            est_time = max(10, char_count * 0.15)
-            progress(0.4, desc=f"Generating ~{est_time:.0f}s for {char_count} chars...")
+                if runtime_xvector_only:
+                    runtime_prompt = _make_xvector_only_prompt(voice_clone_prompt)
 
-            wavs, sr = model.generate_voice_clone(
-                text=test_text,
-                language=language,
-                voice_clone_prompt=runtime_prompt,
-                non_streaming_mode=True,
-                temperature=temperature,
-                top_k=int(top_k),
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                max_new_tokens=auto_max_tokens,
-                subtalker_temperature=sub_temp,
-                subtalker_top_k=int(sub_top_k),
-                subtalker_top_p=sub_top_p,
-            )
+            output_audio = None
+            if test_text.strip():
+                if len(test_text) > MAX_CHARS:
+                    raise gr.Error(f"Test text too long ({len(test_text)} chars)")
 
-            gen_time = time.time() - start_time
-            progress(0.9, desc=f"Saving audio ({gen_time:.1f}s)...")
+                char_count = len(test_text)
+                auto_max_tokens = estimate_max_tokens(test_text)
+                est_time = max(10, char_count * 0.15)
+                progress(0.4, desc=f"Generating ~{est_time:.0f}s for {char_count} chars...")
 
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                sf.write(f.name, wavs[0], sr)
-                n_samples = len(sample_infos) if combine_samples else 1
-                output_audio = save_to_history(
-                    f.name,
-                    test_text,
-                    f"Clone ({model_name}, {n_samples} samples)",
-                    "clone",
-                    gen_time,
-                    model_name=model_name,
-                    params={
-                        "temperature": temperature,
-                        "top_k": int(top_k),
-                        "top_p": top_p,
-                        "repetition_penalty": repetition_penalty,
-                        "max_new_tokens": auto_max_tokens,
-                        "subtalker_temperature": sub_temp,
+                dec_params = DecodingParams(
+                    temperature=float(temperature),
+                    top_p=float(top_p),
+                    top_k=int(top_k),
+                    repetition_penalty=float(repetition_penalty),
+                    max_new_tokens=int(auto_max_tokens),
+                    subtalker_params={
+                        "subtalker_temperature": float(sub_temp),
                         "subtalker_top_k": int(sub_top_k),
-                        "subtalker_top_p": sub_top_p,
-                        "language": language,
-                        "ref_language": ref_language,
-                        "crosslingual_opt": bool(crosslingual_opt),
-                        "num_samples": n_samples,
-                        "x_vector_only_mode_runtime": runtime_xvector_only,
+                        "subtalker_top_p": float(sub_top_p),
+                        "non_streaming_mode": True,
                     },
                 )
-            duration = get_audio_duration(output_audio)
-            audio_info = (
-                f" | Duration: {format_duration(duration)} | Tokens: {auto_max_tokens}"
-            )
-        else:
-            gen_time = time.time() - start_time
-            audio_info = ""
+                vp = VoicePrompt(
+                    voice_id="runtime_clone",
+                    ref_audio_path=Path(primary_info.path) if primary_info and getattr(primary_info, "path", None) else None,
+                    ref_transcript=getattr(primary_info, "transcript", None) if primary_info else None,
+                    x_vector_only=bool(runtime_xvector_only),
+                    raw_prompt_payload=runtime_prompt,
+                )
+                gen_res = facade.synthesize(
+                    text=test_text,
+                    model_id=model_name,
+                    mode="clone",
+                    language=language,
+                    voice_prompt=vp,
+                    params=dec_params,
+                )
+                wavs = [gen_res.audio.samples]
+                sr = gen_res.audio.sample_rate
 
-        prompt_temp = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
-        cpu_prompt = _prompt_to_cpu(voice_clone_prompt)
-        with open(prompt_temp.name, "wb") as f:
-            pickle.dump(cpu_prompt, f)
+                gen_time = time.time() - start_time
+                progress(0.9, desc=f"Saving audio ({gen_time:.1f}s)...")
 
-        samples_meta = [
-            {
-                "path": s.path,
-                "duration": float(s.duration),
-                "transcript": s.transcript,
-                "snr_estimate": float(s.snr_estimate)
-                if s.snr_estimate is not None
-                else None,
-                "is_primary": s.is_primary,
-                "weight": float(s.weight),
-            }
-            for s in sample_infos
-        ]
-        samples_meta_json = json.dumps(samples_meta)
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    sf.write(f.name, wavs[0], sr)
+                    n_samples = len(sample_infos) if combine_samples else 1
+                    output_audio = save_to_history(
+                        f.name,
+                        test_text,
+                        f"Clone ({model_name}, {n_samples} samples)",
+                        "clone",
+                        gen_time,
+                        model_name=model_name,
+                        params={
+                            "temperature": temperature,
+                            "top_k": int(top_k),
+                            "top_p": top_p,
+                            "repetition_penalty": repetition_penalty,
+                            "max_new_tokens": auto_max_tokens,
+                            "subtalker_temperature": sub_temp,
+                            "subtalker_top_k": int(sub_top_k),
+                            "subtalker_top_p": sub_top_p,
+                            "language": language,
+                            "ref_language": ref_language,
+                            "crosslingual_opt": bool(crosslingual_opt),
+                            "num_samples": n_samples,
+                            "x_vector_only_mode_runtime": runtime_xvector_only,
+                        },
+                    )
+                duration = get_audio_duration(output_audio)
+                audio_info = (
+                    f" | Duration: {format_duration(duration)} | Tokens: {auto_max_tokens}"
+                )
+            else:
+                gen_time = time.time() - start_time
+                audio_info = ""
 
-        n_samples = len(sample_infos) if combine_samples else 1
-        total_duration = sum(s.duration for s in sample_infos)
-        progress(1.0, desc="Complete!")
-        status = f"Done in {gen_time:.1f}s{audio_info} | {n_samples} sample(s), {total_duration:.1f}s total ref audio"
+            prompt_temp = tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False)
+            from src.engine.prompt_manager import save_prompt_to_safetensors_file
+            save_prompt_to_safetensors_file(voice_clone_prompt, Path(prompt_temp.name))
 
-        return output_audio, prompt_temp.name, model_name, samples_meta_json, status
+            samples_meta = [
+                {
+                    "path": s.path,
+                    "duration": float(s.duration),
+                    "transcript": s.transcript,
+                    "snr_estimate": float(s.snr_estimate)
+                    if s.snr_estimate is not None
+                    else None,
+                    "is_primary": s.is_primary,
+                    "weight": float(s.weight),
+                }
+                for s in sample_infos
+            ]
+            samples_meta_json = json.dumps(samples_meta)
+
+            n_samples = len(sample_infos) if combine_samples else 1
+            total_duration = sum(s.duration for s in sample_infos)
+            progress(1.0, desc="Complete!")
+            status = f"Done in {gen_time:.1f}s{audio_info} | {n_samples} sample(s), {total_duration:.1f}s total ref audio"
+
+            return output_audio, prompt_temp.name, model_name, samples_meta_json, status
     except Exception as e:
         traceback.print_exc()
         gr.Warning(format_user_error(e))
@@ -2038,22 +2082,20 @@ def save_cloned_voice_multi(
         return "Clone a voice first before saving", gr.update()
 
     try:
-        safe_name = "".join(c for c in voice_name if c.isalnum() or c in "_-").strip()
-        if not safe_name or safe_name in (".", ".."):
-            gr.Warning(
-                "Invalid voice name - use only letters, numbers, underscores, hyphens"
-            )
-            return "Invalid voice name", gr.update()
-
-        voice_dir = (SAVED_VOICES_DIR / safe_name).resolve()
+        from src.engine.prompt_manager import validate_voice_name, validate_voice_directory
         try:
-            voice_dir.relative_to(SAVED_VOICES_DIR.resolve())
-        except ValueError:
-            gr.Warning("Invalid voice name")
-            return "Invalid voice name", gr.update()
+            safe_name = validate_voice_name(voice_name)
+            voice_dir = validate_voice_directory(SAVED_VOICES_DIR / safe_name, SAVED_VOICES_DIR)
+        except Exception as val_e:
+            gr.Warning(str(val_e))
+            return str(val_e), gr.update()
 
-        voice_dir.mkdir(exist_ok=True)
-        shutil.copy(prompt_path, voice_dir / "prompt.pkl")
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        # G2: Save non-executable safetensors
+        if prompt_path.endswith(".safetensors"):
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
+        else:
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
 
         try:
             transcripts = json.loads(transcripts_json) if transcripts_json else {}
@@ -2099,6 +2141,8 @@ def save_cloned_voice_multi(
         ref_script = _guess_script_language(primary_transcript)
 
         metadata = {
+            "schema_version": "1.0",
+            "format": "safetensors",
             "name": voice_name,
             "description": description,
             "style_note": style_note,
@@ -2111,6 +2155,7 @@ def save_cloned_voice_multi(
             "created": datetime.now().isoformat(),
             "multi_sample": True,
             "num_samples": len(saved_ref_paths),
+            "prompt_items": samples_meta,
             "samples": samples_meta,
             "ref_audio_paths": saved_ref_paths,
         }
@@ -2143,25 +2188,20 @@ def save_cloned_voice(
         return "Clone a voice first before saving", gr.update()
 
     try:
-        # Strict sanitization: only alphanumeric, underscore, hyphen
-        safe_name = "".join(c for c in voice_name if c.isalnum() or c in "_-").strip()
-        if not safe_name or safe_name in (".", ".."):
-            gr.Warning(
-                "Invalid voice name - use only letters, numbers, underscores, hyphens"
-            )
-            return "Invalid voice name", gr.update()
-
-        voice_dir = (SAVED_VOICES_DIR / safe_name).resolve()
-        # Ensure we're still within SAVED_VOICES_DIR (proper path containment check)
+        from src.engine.prompt_manager import validate_voice_name, validate_voice_directory
         try:
-            voice_dir.relative_to(SAVED_VOICES_DIR.resolve())
-        except ValueError:
-            gr.Warning("Invalid voice name")
-            return "Invalid voice name", gr.update()
+            safe_name = validate_voice_name(voice_name)
+            voice_dir = validate_voice_directory(SAVED_VOICES_DIR / safe_name, SAVED_VOICES_DIR)
+        except Exception as val_e:
+            gr.Warning(str(val_e))
+            return str(val_e), gr.update()
 
-        voice_dir.mkdir(exist_ok=True)
+        voice_dir.mkdir(parents=True, exist_ok=True)
 
-        shutil.copy(prompt_path, voice_dir / "prompt.pkl")
+        if prompt_path.endswith(".safetensors"):
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
+        else:
+            shutil.copy(prompt_path, voice_dir / "voice_prompt.safetensors")
 
         if ref_audio and isinstance(ref_audio, str):
             shutil.copy(ref_audio, voice_dir / "ref_audio.wav")
@@ -2242,20 +2282,24 @@ def generate_with_saved_voice(
 
     try:
         voice_dir = SAVED_VOICES_DIR / saved_voice_id
+        safetensors_path = voice_dir / "voice_prompt.safetensors"
         prompt_path = voice_dir / "prompt.pkl"
         meta_path = voice_dir / "metadata.json"
 
-        if not prompt_path.exists():
-            raise gr.Error(f"Voice not found: {saved_voice_id}")
-
-        with open(meta_path) as f:
-            meta = json.load(f)
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+        else:
+            meta = {}
         model_name = meta.get("model", "1.7B-Base")
 
         progress(0.05, desc="Loading voice profile...")
 
-        with open(prompt_path, "rb") as f:
-            voice_clone_prompt = pickle.load(f)
+        from src.engine.prompt_manager import load_voice_prompt_items
+        try:
+            voice_clone_prompt = load_voice_prompt_items(voice_dir, base_dir=SAVED_VOICES_DIR)
+        except Exception as load_err:
+            raise gr.Error(f"Failed to load voice '{saved_voice_id}': {load_err}")
 
         # Optionally disable ICL at generation time for cross-lingual output.
         runtime_prompt = voice_clone_prompt
@@ -2290,29 +2334,39 @@ def generate_with_saved_voice(
             if runtime_xvector_only:
                 runtime_prompt = _make_xvector_only_prompt(voice_clone_prompt)
 
-        progress(0.1, desc=f"Loading {model_name}...")
-        model = get_model(model_name)
-        load_time = time.time() - start_time
+        progress(0.1, desc=f"Loading {model_name} via Engine Facade...")
+        facade = get_engine_facade()
 
-        progress(
-            0.2,
-            desc=f"Model loaded ({load_time:.1f}s). Generating ~{est_time:.0f}s for {char_count} chars (max {auto_max_tokens} tokens)...",
-        )
-
-        wavs, sr = model.generate_voice_clone(
-            text=text,
-            language=language,
-            voice_clone_prompt=runtime_prompt,
-            non_streaming_mode=True,
-            temperature=temperature,
+        dec_params = DecodingParams(
+            temperature=float(temperature),
+            top_p=float(top_p),
             top_k=int(top_k),
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            max_new_tokens=auto_max_tokens,
-            subtalker_temperature=sub_temp,
-            subtalker_top_k=int(sub_top_k),
-            subtalker_top_p=sub_top_p,
+            repetition_penalty=float(repetition_penalty),
+            max_new_tokens=int(auto_max_tokens),
+            subtalker_params={
+                "subtalker_temperature": float(sub_temp),
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": float(sub_top_p),
+                "non_streaming_mode": True,
+            },
         )
+        vp = VoicePrompt(
+            voice_id=saved_voice_id,
+            ref_audio_path=None,
+            ref_transcript=meta.get("ref_text"),
+            x_vector_only=bool(runtime_xvector_only),
+            raw_prompt_payload=runtime_prompt,
+        )
+        gen_res = facade.synthesize(
+            text=text,
+            model_id=model_name,
+            mode="clone",
+            language=language,
+            voice_prompt=vp,
+            params=dec_params,
+        )
+        wavs = [gen_res.audio.samples]
+        sr = gen_res.audio.sample_rate
 
         gen_time = time.time() - start_time
 

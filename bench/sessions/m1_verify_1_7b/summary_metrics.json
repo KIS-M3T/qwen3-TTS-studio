@@ -1,0 +1,18 @@
+{
+  "session_id": "m1_verify_1_7b",
+  "generated_at_utc": "2026-11-13T10:15:38.437455+00:00",
+  "total_events": 2,
+  "models": {
+    "1.7B-Base": {
+      "total_runs": 2,
+      "measured_runs": 1,
+      "warmup_runs": 1,
+      "error_runs": 0,
+      "rtf_median": 4.6311,
+      "rtf_min": 4.6311,
+      "rtf_max": 4.6311,
+      "inference_time_mean_sec": 21.1178,
+      "max_peak_vram_mb": 4349.35
+    }
+  }
+}

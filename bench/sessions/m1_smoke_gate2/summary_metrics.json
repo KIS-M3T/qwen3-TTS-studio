@@ -1,0 +1,18 @@
+{
+  "session_id": "m1_smoke_gate2",
+  "generated_at_utc": "2026-11-12T16:29:59.290670+00:00",
+  "total_events": 2,
+  "models": {
+    "0.6B-Base": {
+      "total_runs": 2,
+      "measured_runs": 1,
+      "warmup_runs": 1,
+      "error_runs": 0,
+      "rtf_median": 4.4636,
+      "rtf_min": 4.4636,
+      "rtf_max": 4.4636,
+      "inference_time_mean_sec": 19.6399,
+      "max_peak_vram_mb": 2409.88
+    }
+  }
+}

@@ -65,7 +65,7 @@ Thumbs.db
 .claude/
 
 # Test files
-test_*.py
+/test_*.py
 run_all_tests.sh
 validate_*.py
 generate_*_podcast.py
