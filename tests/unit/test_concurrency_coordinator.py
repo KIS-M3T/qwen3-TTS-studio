@@ -5,6 +5,8 @@ coordinated across threads to prevent unloading a resident model during inferenc
 and guarantees deadlock-free operation between TTSEngineFacade and legacy model caches.
 """
 
+import subprocess
+import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -332,3 +334,161 @@ def test_k2_concurrent_legacy_podcast_and_facade_synthesis():
         "legacy_finish_generation",
         "facade_finish_synthesis",
     ]
+
+
+def test_k2_get_model_direct_call_synchronized_with_active_lease():
+    """K2 Mandatory test: Two threads, NO facade callbacks registered.
+
+    Thread 1 holds an active lease on Model A.
+    Thread 2 calls get_model('B') directly.
+    Verify:
+    1. Model A is NOT unloaded during Thread 1's inference.
+    2. Thread 2 is blocked by _global_execution_lock and only acquires Model B after Thread 1 releases its lease.
+    3. Both threads complete without deadlock.
+    """
+    import audio.model_loader as ml
+
+    # Ensure clean isolated state
+    ml._facade_unload_callbacks.clear()
+    ml.loaded_models.clear()
+    ml._active_model_leases.clear()
+    ml.MAX_LOADED_MODELS = 1
+
+    t1_in_lease = threading.Event()
+    t2_calling_get_model = threading.Event()
+    t1_done = threading.Event()
+    t2_done = threading.Event()
+
+    execution_order = []
+    model_a_unloaded_during_use = False
+
+    mock_model_a = MagicMock(name="ModelA")
+    mock_model_a.model.eval = MagicMock()
+    mock_model_b = MagicMock(name="ModelB")
+    mock_model_b.model.eval = MagicMock()
+
+    def mock_from_pretrained(path, **kwargs):
+        if "0.6B-Base" in str(path):
+            return mock_model_a
+        return mock_model_b
+
+    def run_thread1():
+        nonlocal model_a_unloaded_during_use
+        with ml.lease_model("0.6B-Base") as model:
+            execution_order.append("t1_in_lease")
+            t1_in_lease.set()
+
+            # Wait until Thread 2 attempts direct get_model call
+            assert t2_calling_get_model.wait(timeout=5.0), "Thread 2 did not call get_model in time"
+            time.sleep(0.1)  # Simulate active inference time
+
+            # Verify invariant: Model A has NOT been evicted
+            if "0.6B-Base" not in ml.loaded_models:
+                model_a_unloaded_during_use = True
+            if ml.get_active_lease_count("0.6B-Base") != 1:
+                model_a_unloaded_during_use = True
+
+            execution_order.append("t1_finish_inference")
+            t1_done.set()
+
+    def run_thread2():
+        # Wait until Thread 1 has acquired lease
+        assert t1_in_lease.wait(timeout=5.0), "Thread 1 did not enter lease in time"
+        t2_calling_get_model.set()
+        execution_order.append("t2_call_get_model")
+
+        # Direct get_model call without lease: MUST block on _global_execution_lock until Thread 1 exits
+        m_b = ml.get_model("1.7B-Base")
+        execution_order.append("t2_got_model")
+        assert m_b is mock_model_b
+        t2_done.set()
+
+    with patch("qwen_tts.Qwen3TTSModel.from_pretrained", side_effect=mock_from_pretrained):
+        th1 = threading.Thread(target=run_thread1, name="LeaseWorker")
+        th2 = threading.Thread(target=run_thread2, name="DirectCaller")
+
+        th1.start()
+        th2.start()
+
+        th1.join(timeout=5.0)
+        th2.join(timeout=5.0)
+
+        assert not th1.is_alive(), "Thread 1 timed out or deadlocked"
+        assert not th2.is_alive(), "Thread 2 timed out or deadlocked"
+
+        assert t1_done.is_set(), "Thread 1 did not complete"
+        assert t2_done.is_set(), "Thread 2 did not complete"
+        assert not model_a_unloaded_during_use, "Violation: Model A was evicted while lease was active!"
+
+        # Invariant: Thread 1 finishes inference BEFORE Thread 2 gets Model B
+        assert execution_order == [
+            "t1_in_lease",
+            "t2_call_get_model",
+            "t1_finish_inference",
+            "t2_got_model",
+        ]
+
+
+def test_k2_get_model_deadlock_subprocess_regression():
+    """K2 Regression test: Run the concurrent direct get_model scenario in an isolated subprocess with a strict timeout.
+
+    Guarantees that any potential regression in locking or eviction cannot hang the test runner.
+    """
+    script = '''
+import threading
+import time
+from unittest.mock import MagicMock, patch
+import audio.model_loader as ml
+
+ml._facade_unload_callbacks.clear()
+ml.loaded_models.clear()
+ml._active_model_leases.clear()
+ml.MAX_LOADED_MODELS = 1
+
+t1_in_lease = threading.Event()
+t2_called = threading.Event()
+t1_done = threading.Event()
+t2_done = threading.Event()
+
+mock_a = MagicMock()
+mock_a.model.eval = MagicMock()
+mock_b = MagicMock()
+mock_b.model.eval = MagicMock()
+
+def mock_from_pretrained(path, **kwargs):
+    return mock_a if "0.6B-Base" in str(path) else mock_b
+
+def run_t1():
+    with ml.lease_model("0.6B-Base"):
+        t1_in_lease.set()
+        assert t2_called.wait(timeout=3.0)
+        time.sleep(0.05)
+        t1_done.set()
+
+def run_t2():
+    assert t1_in_lease.wait(timeout=3.0)
+    t2_called.set()
+    m = ml.get_model("1.7B-Base")
+    assert m is mock_b
+    t2_done.set()
+
+with patch("qwen_tts.Qwen3TTSModel.from_pretrained", side_effect=mock_from_pretrained):
+    th1 = threading.Thread(target=run_t1)
+    th2 = threading.Thread(target=run_t2)
+    th1.start()
+    th2.start()
+    th1.join(timeout=4.0)
+    th2.join(timeout=4.0)
+
+assert not th1.is_alive() and not th2.is_alive()
+assert t1_done.is_set() and t2_done.is_set()
+print("SUBPROCESS_CONCURRENCY_OK")
+'''
+    res = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0, f"Subprocess failed with stderr:\n{res.stderr}\nstdout:\n{res.stdout}"
+    assert "SUBPROCESS_CONCURRENCY_OK" in res.stdout

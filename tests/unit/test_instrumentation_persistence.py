@@ -371,3 +371,39 @@ def test_k1_atomic_no_clobber_posix_branch_emulation():
             with pytest.raises(FileExistsError):
                 atomic_publish_file_no_clobber(rogue, target)
         assert target.read_bytes() == b"EXISTING_DATA"
+
+
+def test_k1_atomic_no_clobber_posix_branch_publishes_when_destination_absent():
+    """K1 Optional: Verify that the POSIX branch executes os.link() and os.unlink() when target is absent."""
+    from src.instrumentation.tracker import atomic_publish_file_no_clobber
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        target = root / "new_posix_target.wav"
+        tmp_src = root / ".tmp_valid_audio.wav"
+        payload = b"NEURAL_WAV_BYTES_FOR_POSIX_TEST"
+        tmp_src.write_bytes(payload)
+
+        with patch("sys.platform", "linux"):
+            atomic_publish_file_no_clobber(tmp_src, target)
+
+        assert target.exists()
+        assert target.read_bytes() == payload
+        assert not tmp_src.exists()
+
+
+def test_k1_atomic_no_clobber_posix_branch_link_race_condition():
+    """K1 Optional: Verify that if os.link raises FileExistsError (kernel race condition), it is cleanly propagated."""
+    from src.instrumentation.tracker import atomic_publish_file_no_clobber
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        target = root / "race_target.wav"
+        tmp_src = root / ".tmp_race_audio.wav"
+        tmp_src.write_bytes(b"RACE_PAYLOAD")
+
+        with patch("sys.platform", "linux"), patch("os.link", side_effect=FileExistsError("File exists at link")):
+            with pytest.raises(FileExistsError, match="(already exists|File exists)"):
+                atomic_publish_file_no_clobber(tmp_src, target)

@@ -97,6 +97,16 @@ def save_voice_prompt_items(
         ref_audio_paths: Optional list of relative reference audio paths.
         extra_metadata: Optional extra metadata dictionary.
 
+    Note on sample counts vs. reference audio files:
+        The `num_samples` and prompt tensor structure strictly represent the number of
+        `VoiceClonePromptItem` conditioning units (each containing a speaker embedding,
+        optional reference code tokens, and optional transcription). When a workflow combines
+        multiple raw audio recordings into fewer conditioning items (e.g., concatenating
+        audio clips or averaging embeddings into a single VoiceClonePromptItem), `len(ref_audio_paths)`
+        can legitimately differ from `num_samples`. The engine's strict validation governs
+        the consistency between declared `num_samples` and the actual prompt tensors in
+        `voice_prompt.safetensors`.
+
     Returns:
         Path: Resolved target voice directory.
     """

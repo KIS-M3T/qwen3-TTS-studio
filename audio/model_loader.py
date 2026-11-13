@@ -244,91 +244,102 @@ def get_model(model_name: str):
     """
     trigger_facade_unloads()
 
-    with _model_lock:
-        if model_name in loaded_models:
-            loaded_models.move_to_end(model_name)
-            return loaded_models[model_name]
+    with _global_execution_lock:
+        with _model_lock:
+            if model_name in loaded_models:
+                loaded_models.move_to_end(model_name)
+                return loaded_models[model_name]
 
-        while len(loaded_models) >= MAX_LOADED_MODELS:
-            old_name, _ = next(iter(loaded_models.items()))
-            _unload_model(old_name)
+            # Evict models without active leases until below MAX_LOADED_MODELS (K2)
+            for old_name in list(loaded_models.keys()):
+                if len(loaded_models) < MAX_LOADED_MODELS:
+                    break
+                if _active_model_leases.get(old_name, 0) == 0:
+                    _unload_model(old_name)
 
-        _check_qwen_tts_version()
-
-        print(f"Loading {model_name}...")
-        from qwen_tts import Qwen3TTSModel
-
-        model_path = MODEL_PATHS.get(model_name)
-        if not model_path:
-            raise ValueError(
-                f"Unknown model: {model_name}. Available: {list(MODEL_PATHS.keys())}"
-            )
-
-        if not os.path.exists(model_path):
-            raise ValueError(f"Model not found: {model_path}")
-
-        tokenizer_src = Path("Qwen3-TTS-Tokenizer-12Hz/model.safetensors")
-        speech_tokenizer_dst = (
-            Path(model_path) / "speech_tokenizer" / "model.safetensors"
-        )
-        if tokenizer_src.exists() and not speech_tokenizer_dst.exists():
-            try:
-                speech_tokenizer_dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(tokenizer_src, speech_tokenizer_dst)
-            except PermissionError as e:
-                raise RuntimeError(
-                    "Speech tokenizer weights are missing in the model directory, but the app cannot write them. "
-                    "This often happens in Docker when model folders are bind-mounted read-only or owned by a "
-                    "different UID/GID.\n\n"
-                    "Fix: copy the tokenizer weights on the host so the model directory contains:\n"
-                    f"  {speech_tokenizer_dst}\n\n"
-                    "Source tokenizer weights expected at:\n"
-                    f"  {tokenizer_src}\n"
-                ) from e
-
-        device = _detect_device()
-        attn_impl = _get_attn_implementation(device)
-        preferred_dtypes = [torch.bfloat16, torch.float16, torch.float32]
-        last_err = None
-
-        for tdtype in preferred_dtypes:
-            load_kwargs: dict = {
-                "device_map": device,
-                "dtype": tdtype,
-            }
-            if attn_impl is not None:
-                load_kwargs["attn_implementation"] = attn_impl
-
-            try:
-                m = Qwen3TTSModel.from_pretrained(model_path, **load_kwargs)
-            except Exception as e:
-                if "attn_implementation" not in load_kwargs:
-                    last_err = e
-                    _gpu_cleanup()
-                    continue
-                # FA2 kwarg rejected or FA2 failed at init — retry without it
-                print(
-                    f"[MODEL] FlashAttention failed ({type(e).__name__}), retrying without it"
+            if len(loaded_models) >= MAX_LOADED_MODELS:
+                warnings.warn(
+                    f"[MODEL] Cache contains {len(loaded_models)} model(s) with active lease(s); "
+                    f"temporarily retaining all active models to prevent premature eviction (K2).",
+                    RuntimeWarning,
                 )
-                load_kwargs.pop("attn_implementation")
-                attn_impl = None
+
+            _check_qwen_tts_version()
+
+            print(f"Loading {model_name}...")
+            from qwen_tts import Qwen3TTSModel
+
+            model_path = MODEL_PATHS.get(model_name)
+            if not model_path:
+                raise ValueError(
+                    f"Unknown model: {model_name}. Available: {list(MODEL_PATHS.keys())}"
+                )
+
+            if not os.path.exists(model_path):
+                raise ValueError(f"Model not found: {model_path}")
+
+            tokenizer_src = Path("Qwen3-TTS-Tokenizer-12Hz/model.safetensors")
+            speech_tokenizer_dst = (
+                Path(model_path) / "speech_tokenizer" / "model.safetensors"
+            )
+            if tokenizer_src.exists() and not speech_tokenizer_dst.exists():
+                try:
+                    speech_tokenizer_dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(tokenizer_src, speech_tokenizer_dst)
+                except PermissionError as e:
+                    raise RuntimeError(
+                        "Speech tokenizer weights are missing in the model directory, but the app cannot write them. "
+                        "This often happens in Docker when model folders are bind-mounted read-only or owned by a "
+                        "different UID/GID.\n\n"
+                        "Fix: copy the tokenizer weights on the host so the model directory contains:\n"
+                        f"  {speech_tokenizer_dst}\n\n"
+                        "Source tokenizer weights expected at:\n"
+                        f"  {tokenizer_src}\n"
+                    ) from e
+
+            device = _detect_device()
+            attn_impl = _get_attn_implementation(device)
+            preferred_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+            last_err = None
+
+            for tdtype in preferred_dtypes:
+                load_kwargs: dict = {
+                    "device_map": device,
+                    "dtype": tdtype,
+                }
+                if attn_impl is not None:
+                    load_kwargs["attn_implementation"] = attn_impl
+
                 try:
                     m = Qwen3TTSModel.from_pretrained(model_path, **load_kwargs)
-                except Exception as e2:
-                    last_err = e2
-                    _gpu_cleanup()
-                    continue
+                except Exception as e:
+                    if "attn_implementation" not in load_kwargs:
+                        last_err = e
+                        _gpu_cleanup()
+                        continue
+                    # FA2 kwarg rejected or FA2 failed at init — retry without it
+                    print(
+                        f"[MODEL] FlashAttention failed ({type(e).__name__}), retrying without it"
+                    )
+                    load_kwargs.pop("attn_implementation")
+                    attn_impl = None
+                    try:
+                        m = Qwen3TTSModel.from_pretrained(model_path, **load_kwargs)
+                    except Exception as e2:
+                        last_err = e2
+                        _gpu_cleanup()
+                        continue
 
-            try:
-                m.model.eval()
-            except Exception:
-                pass
-            _patch_generate_min_tokens(m)
-            loaded_models[model_name] = m
-            print(f"{model_name} loaded on {device} with {tdtype}!")
-            return m
+                try:
+                    m.model.eval()
+                except Exception:
+                    pass
+                _patch_generate_min_tokens(m)
+                loaded_models[model_name] = m
+                print(f"{model_name} loaded on {device} with {tdtype}!")
+                return m
 
-        raise RuntimeError(f"Failed to load {model_name}: {last_err}")
+            raise RuntimeError(f"Failed to load {model_name}: {last_err}")
 
 
 if __name__ == "__main__":
