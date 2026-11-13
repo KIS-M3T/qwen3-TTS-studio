@@ -180,7 +180,7 @@ def test_concurrency_ui_singleton_threadsafe():
 
 
 def test_concurrency_legacy_model_loader_coordination():
-    """Verify coordination and deadlock-free unloads between Facade and legacy model loader."""
+    """Verify coordination and deadlock-free unloads between Facade and legacy model loader (J2, K2)."""
     import audio.model_loader as ml
     from src.engine.facade import TTSEngineFacade
 
@@ -192,20 +192,143 @@ def test_concurrency_legacy_model_loader_coordination():
 
     assert "1.7B-VoiceDesign" in ml.loaded_models
 
-    # 2. Facade unload_legacy_models should cleanly purge legacy cache
+    # 2. Facade unload_legacy_models should cleanly purge legacy cache when no lease is active
     facade.unload_legacy_models()
     assert len(ml.loaded_models) == 0
 
-    # 3. Simulate Facade adapter loaded, then legacy get_model calls hook
+    # 3. Simulate Facade adapter loaded, then legacy trigger_facade_unloads calls hook
     mock_adapter = MockAdapter("0.6B-Base")
     mock_adapter.load()
     facade._active_adapter = mock_adapter
 
     assert facade._active_adapter is not None
 
-    # Triggering the unload callback registered with ml must unload facade adapter
-    if ml._facade_unload_callback:
-        ml._facade_unload_callback()
+    # Triggering the unload callbacks registered with ml must unload facade adapter
+    ml.trigger_facade_unloads()
 
     assert facade._active_adapter is None
     assert mock_adapter.unloaded
+
+
+def test_k2_multiple_facades_safe_callback_registry():
+    """K2: Verify that multiple facade instances register without overwriting each other."""
+    import audio.model_loader as ml
+    from src.engine.facade import TTSEngineFacade
+
+    f1 = TTSEngineFacade(default_device="cpu")
+    f2 = TTSEngineFacade(default_device="cpu")
+
+    a1 = MockAdapter("0.6B-Base")
+    a1.load()
+    f1._active_adapter = a1
+
+    a2 = MockAdapter("1.7B-Base")
+    a2.load()
+    f2._active_adapter = a2
+
+    assert f1._active_adapter is not None
+    assert f2._active_adapter is not None
+
+    # Trigger unloads across all registered facades safely
+    ml.trigger_facade_unloads()
+
+    assert a1.unloaded
+    assert a2.unloaded
+    assert f1._active_adapter is None
+    assert f2._active_adapter is None
+
+    # Unregister f1
+    f1.close()
+    f2.close()
+
+
+def test_k2_concurrent_legacy_podcast_and_facade_synthesis():
+    """K2 Mandatory test: Two threads simulating concurrent legacy podcast and new engine facade synthesis.
+
+    Thread 1 runs legacy podcast dialogue generation holding a lease.
+    Thread 2 requests a model via new TTSEngineFacade.
+    Verify: Thread 2 does NOT evict the legacy model prematurely, does NOT load concurrently,
+    and both threads complete without deadlock.
+    """
+    import audio.model_loader as ml
+    from src.engine.facade import TTSEngineFacade
+
+    facade = TTSEngineFacade(default_device="cpu")
+
+    legacy_model_unloaded_during_use = False
+    execution_order = []
+
+    legacy_started = threading.Event()
+    facade_waiting = threading.Event()
+    legacy_finished = threading.Event()
+    facade_finished = threading.Event()
+
+    mock_legacy_model = MagicMock()
+    mock_facade_adapter = MockAdapter("0.6B-Base")
+
+    def mock_get_model(name):
+        return mock_legacy_model
+
+    def run_legacy_podcast_thread():
+        nonlocal legacy_model_unloaded_during_use
+        execution_order.append("legacy_enter_lease")
+
+        with patch("audio.model_loader.get_model", side_effect=mock_get_model):
+            with ml.lease_model("1.7B-CustomVoice") as model:
+                with ml._model_lock:
+                    ml.loaded_models["1.7B-CustomVoice"] = model
+
+                execution_order.append("legacy_start_generation")
+                legacy_started.set()
+
+                # Wait until Thread 2 attempts to use facade
+                assert facade_waiting.wait(timeout=5.0), "Thread 2 did not attempt synthesis in time"
+                time.sleep(0.1)  # Simulate generation duration while Thread 2 is blocked
+
+                # Invariant: model MUST NOT be evicted from loaded_models while lease is active
+                if "1.7B-CustomVoice" not in ml.loaded_models:
+                    legacy_model_unloaded_during_use = True
+
+                execution_order.append("legacy_finish_generation")
+                legacy_finished.set()
+
+    def run_facade_thread():
+        # Wait until legacy generation is in progress
+        assert legacy_started.wait(timeout=5.0), "Legacy thread did not start in time"
+        facade_waiting.set()
+        execution_order.append("facade_request_synthesis")
+
+        def adapter_factory(model_id):
+            return mock_facade_adapter
+
+        with patch("src.engine.facade.Qwen3EngineAdapter", side_effect=adapter_factory):
+            # Must block until Thread 1's lease_model exits
+            res = facade.synthesize(text="Facade phrase", model_id="0.6B-Base")
+            execution_order.append("facade_finish_synthesis")
+            assert res.model_version == "0.6B-Base"
+            facade_finished.set()
+
+    th_legacy = threading.Thread(target=run_legacy_podcast_thread, name="LegacyPodcastWorker")
+    th_facade = threading.Thread(target=run_facade_thread, name="FacadeWorker")
+
+    th_legacy.start()
+    th_facade.start()
+
+    th_legacy.join(timeout=10.0)
+    th_facade.join(timeout=10.0)
+
+    assert not th_legacy.is_alive(), "Legacy podcast thread timed out or deadlocked"
+    assert not th_facade.is_alive(), "Facade thread timed out or deadlocked"
+
+    assert legacy_finished.is_set()
+    assert facade_finished.is_set()
+    assert not legacy_model_unloaded_during_use, "Violation: Legacy model was evicted while podcast generation was in progress!"
+
+    # Invariant: Thread 1 finishes generation BEFORE Thread 2 finishes synthesis
+    assert execution_order == [
+        "legacy_enter_lease",
+        "legacy_start_generation",
+        "facade_request_synthesis",
+        "legacy_finish_generation",
+        "facade_finish_synthesis",
+    ]

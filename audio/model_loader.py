@@ -6,8 +6,10 @@ import gc
 import functools
 import threading
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from collections import OrderedDict
+from typing import Optional
 
 import torch
 
@@ -131,14 +133,53 @@ def _patch_generate_min_tokens(model, min_new_tokens: int = MIN_NEW_TOKENS_DEFAU
 
 
 loaded_models: OrderedDict = OrderedDict()
-_model_lock = threading.Lock()
-_facade_unload_callback = None
+
+# Lock hierarchy (K2):
+# Level 1: _global_execution_lock (RLock) — Acquired FIRST before inference or lifecycle transitions.
+# Level 2: _model_lock (RLock) — Acquired SECOND for dictionary mutations and lease counts.
+# Level 3: _callback_lock (Lock) — Acquired independently for facade callback registry.
+# Rule: A thread holding Level 2 or Level 3 must NEVER attempt to acquire Level 1.
+_global_execution_lock = threading.RLock()
+_model_lock = threading.RLock()
+_callback_lock = threading.Lock()
+_facade_unload_callbacks: set = set()
+_active_model_leases: dict[str, int] = {}
+
+
+def get_global_execution_lock() -> threading.RLock:
+    """Return the shared global execution lock used to coordinate legacy and engine inference (K2)."""
+    return _global_execution_lock
 
 
 def register_facade_unload_callback(callback) -> None:
-    """Register callback from Engine Facade to unload resident adapter when legacy model loads (J2)."""
-    global _facade_unload_callback
-    _facade_unload_callback = callback
+    """Register callback from Engine Facade to unload resident adapter when legacy model loads (J2, K2)."""
+    with _callback_lock:
+        _facade_unload_callbacks.add(callback)
+
+
+def unregister_facade_unload_callback(callback) -> None:
+    """Unregister callback from Engine Facade upon shutdown or garbage collection (K2)."""
+    with _callback_lock:
+        _facade_unload_callbacks.discard(callback)
+
+
+def trigger_facade_unloads() -> None:
+    """Trigger all registered facade unload callbacks safely without holding registry lock (K2)."""
+    with _callback_lock:
+        cbs = list(_facade_unload_callbacks)
+    for cb in cbs:
+        try:
+            cb()
+        except Exception as e:
+            print(f"[MODEL] Warning: Failed to trigger facade unload: {e}")
+
+
+def get_active_lease_count(model_name: Optional[str] = None) -> int:
+    """Return number of active leases on a model or across all legacy models (K2)."""
+    with _model_lock:
+        if model_name is not None:
+            return _active_model_leases.get(model_name, 0)
+        return sum(_active_model_leases.values())
 
 
 def _gpu_cleanup():
@@ -149,11 +190,42 @@ def _gpu_cleanup():
         torch.cuda.empty_cache()
 
 
-def _unload_model(model_name: str) -> None:
-    if model_name in loaded_models:
-        del loaded_models[model_name]
-        _gpu_cleanup()
-        print(f"Unloaded {model_name}")
+def _unload_model(model_name: str) -> bool:
+    """Unload a model from loaded_models cache, unless an active lease is in progress (K2)."""
+    with _model_lock:
+        if _active_model_leases.get(model_name, 0) > 0:
+            print(f"[MODEL] Skipping unload of '{model_name}': active lease in progress ({_active_model_leases[model_name]} active)")
+            return False
+        if model_name in loaded_models:
+            del loaded_models[model_name]
+            _gpu_cleanup()
+            print(f"Unloaded {model_name}")
+            return True
+        return False
+
+
+@contextmanager
+def lease_model(model_name: str):
+    """Context manager acquiring a lease on a legacy model during generation (K2).
+
+    Protects the entire sequence 'get_model -> inference -> release':
+    1. Acquires _global_execution_lock to prevent conflicting inference or adapter loading.
+    2. Triggers registered Facade unloads to free resident adapter VRAM.
+    3. Retrieves or loads the model via get_model().
+    4. Increments the model lease counter to prevent cache eviction while in use.
+    5. Yields the model for inference.
+    6. Decrements the lease counter upon context exit and releases the lock.
+    """
+    with _global_execution_lock:
+        trigger_facade_unloads()
+        model = get_model(model_name)
+        with _model_lock:
+            _active_model_leases[model_name] = _active_model_leases.get(model_name, 0) + 1
+        try:
+            yield model
+        finally:
+            with _model_lock:
+                _active_model_leases[model_name] = max(0, _active_model_leases.get(model_name, 1) - 1)
 
 
 def get_model(model_name: str):
@@ -170,11 +242,7 @@ def get_model(model_name: str):
         ValueError: If model path doesn't exist
         RuntimeError: If model loading fails
     """
-    if _facade_unload_callback is not None:
-        try:
-            _facade_unload_callback()
-        except Exception as e:
-            print(f"[MODEL] Warning: Failed to trigger facade unload: {e}")
+    trigger_facade_unloads()
 
     with _model_lock:
         if model_name in loaded_models:

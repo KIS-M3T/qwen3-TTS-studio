@@ -387,21 +387,17 @@ def generate_dialogue_audio(
         model_name = base_model_name
 
     try:
-        from audio.model_loader import get_model
+        from audio.model_loader import lease_model
 
-        model = get_model(model_name)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load model '{model_name}': {e}")
-
-    try:
-        if speaker.type == "preset":
-            wavs, sr = _generate_preset_voice(
-                model, dialogue.text, speaker.voice_id, params
-            )
-        else:
-            wavs, sr = _generate_saved_voice(
-                model, dialogue.text, speaker.voice_id, params
-            )
+        with lease_model(model_name) as model:
+            if speaker.type == "preset":
+                wavs, sr = _generate_preset_voice(
+                    model, dialogue.text, speaker.voice_id, params
+                )
+            else:
+                wavs, sr = _generate_saved_voice(
+                    model, dialogue.text, speaker.voice_id, params
+                )
     except Exception as e:
         raise RuntimeError(f"TTS generation failed for speaker '{speaker.name}': {e}")
 

@@ -38,22 +38,33 @@ class TTSEngineFacade:
         self.default_device = default_device
         self.default_dtype = default_dtype
         self._active_adapter: Optional[Qwen3EngineAdapter] = None
-        self._coordinator_lock = threading.RLock()
 
-        # Coordinate with legacy audio.model_loader cache to ensure single resident model in VRAM (J2)
+        # Level 1 coordinator lock shared with legacy model loader (J2, K2)
         try:
             import audio.model_loader as ml
+            self._coordinator_lock = ml.get_global_execution_lock()
             ml.register_facade_unload_callback(self.unload)
+        except Exception:
+            self._coordinator_lock = threading.RLock()
+
+    def close(self) -> None:
+        """Release coordinator hooks upon facade shutdown (K2)."""
+        try:
+            import audio.model_loader as ml
+            ml.unregister_facade_unload_callback(self.unload)
         except Exception:
             pass
 
     def unload_legacy_models(self) -> None:
-        """Purge models from audio.model_loader legacy cache to prevent VRAM overcommit (J2)."""
+        """Purge models from audio.model_loader legacy cache to prevent VRAM overcommit (J2, K2)."""
         try:
             import audio.model_loader as ml
             with ml._model_lock:
                 for m_name in list(ml.loaded_models.keys()):
-                    ml._unload_model(m_name)
+                    if ml.get_active_lease_count(m_name) == 0:
+                        ml._unload_model(m_name)
+                    else:
+                        logger.warning(f"Skipping unload of legacy model '{m_name}': active lease in progress (K2)")
         except Exception as e:
             logger.debug(f"Legacy model unload skipped or failed: {e}")
 
