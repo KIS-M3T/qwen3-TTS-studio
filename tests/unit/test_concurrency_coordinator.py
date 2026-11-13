@@ -492,3 +492,130 @@ print("SUBPROCESS_CONCURRENCY_OK")
     )
     assert res.returncode == 0, f"Subprocess failed with stderr:\n{res.stderr}\nstdout:\n{res.stdout}"
     assert "SUBPROCESS_CONCURRENCY_OK" in res.stdout
+
+
+def test_k2_deterministic_mutual_exclusion_legacy_and_facade_residency():
+    """Verify indivisibility of trigger_facade_unloads() + get_model() under _global_execution_lock.
+
+    Demonstrates that interleaved requests between legacy get_model() and facade adapter loading
+    cannot result in dual residency of both a legacy model and a facade adapter in memory.
+    """
+    import audio.model_loader as ml
+    from src.engine.facade import TTSEngineFacade
+
+    # Ensure clean state
+    ml.loaded_models.clear()
+    ml._active_model_leases.clear()
+
+    facade = TTSEngineFacade(default_device="cpu")
+
+    mock_facade_adapter = MockAdapter("0.6B-Base")
+    mock_legacy_model = MagicMock(name="LegacyModel")
+    mock_legacy_model.model.eval = MagicMock()
+
+    residency_violations = []
+    lock = threading.Lock()
+
+    def record_and_verify_residency(step_name: str):
+        with lock:
+            legacy_count = len(ml.loaded_models)
+            has_facade = facade._active_adapter is not None
+            if legacy_count > 0 and has_facade:
+                residency_violations.append(
+                    f"Violation at {step_name}: {legacy_count} legacy model(s) and facade adapter '{facade._active_adapter.model_id}' both resident!"
+                )
+
+    # 1. Start with an active facade adapter resident
+    mock_facade_adapter.load()
+    facade._active_adapter = mock_facade_adapter
+    record_and_verify_residency("initial_facade_loaded")
+    assert facade._active_adapter is not None
+    assert len(ml.loaded_models) == 0
+
+    barrier = threading.Barrier(2)
+    thread1_done = threading.Event()
+    thread2_done = threading.Event()
+
+    def run_legacy_caller():
+        # Both threads synchronize at barrier to start simultaneously
+        barrier.wait()
+        with patch("qwen_tts.Qwen3TTSModel.from_pretrained", return_value=mock_legacy_model):
+            m = ml.get_model("0.6B-Base")
+            assert m is mock_legacy_model
+            record_and_verify_residency("after_legacy_get_model")
+            thread1_done.set()
+
+    def run_facade_caller():
+        # Both threads synchronize at barrier to start simultaneously
+        barrier.wait()
+        def adapter_factory(model_id=None, **kwargs):
+            a = MockAdapter(model_id or "default")
+            a.load()
+            return a
+
+        with patch("src.engine.facade.Qwen3EngineAdapter", side_effect=adapter_factory):
+            adapter = facade.get_or_load_adapter("1.7B-Base")
+            assert adapter.model_id == "1.7B-Base"
+            record_and_verify_residency("after_facade_get_or_load_adapter")
+            thread2_done.set()
+
+    th1 = threading.Thread(target=run_legacy_caller, name="LegacyCaller")
+    th2 = threading.Thread(target=run_facade_caller, name="FacadeCaller")
+
+    th1.start()
+    th2.start()
+
+    th1.join(timeout=5.0)
+    th2.join(timeout=5.0)
+
+    assert not th1.is_alive(), "Legacy thread deadlocked"
+    assert not th2.is_alive(), "Facade thread deadlocked"
+    assert thread1_done.is_set()
+    assert thread2_done.is_set()
+
+    # Final post-condition verification
+    record_and_verify_residency("final_state")
+    assert len(residency_violations) == 0, f"Residency violations detected:\n" + "\n".join(residency_violations)
+
+    # Invariant: exactly one subsystem is resident, never both
+    legacy_resident = len(ml.loaded_models) > 0
+    facade_resident = facade._active_adapter is not None
+    assert legacy_resident != facade_resident, f"Expected exactly one system resident, got legacy={legacy_resident}, facade={facade_resident}"
+
+    facade.close()
+
+
+def test_k2_deterministic_sequential_interleaved_transitions():
+    """Verify that multiple consecutive alternating transitions between legacy and facade preserve single residency."""
+    import audio.model_loader as ml
+    from src.engine.facade import TTSEngineFacade
+
+    ml.loaded_models.clear()
+    ml._active_model_leases.clear()
+
+    facade = TTSEngineFacade(default_device="cpu")
+    mock_legacy_model = MagicMock(name="LegacyModel")
+    mock_legacy_model.model.eval = MagicMock()
+
+    def adapter_factory(model_id=None, **kwargs):
+        a = MockAdapter(model_id or "default")
+        a.load()
+        return a
+
+    with patch("qwen_tts.Qwen3TTSModel.from_pretrained", return_value=mock_legacy_model), \
+         patch("src.engine.facade.Qwen3EngineAdapter", side_effect=adapter_factory):
+
+        for i in range(5):
+            # 1. Call legacy get_model
+            m = ml.get_model("0.6B-Base")
+            assert m is mock_legacy_model
+            assert len(ml.loaded_models) == 1
+            assert facade._active_adapter is None, f"Iteration {i}: Facade adapter was not unloaded when legacy loaded!"
+
+            # 2. Call facade get_or_load_adapter
+            ad = facade.get_or_load_adapter("1.7B-Base")
+            assert ad.model_id == "1.7B-Base"
+            assert facade._active_adapter is not None
+            assert len(ml.loaded_models) == 0, f"Iteration {i}: Legacy models were not purged when facade loaded!"
+
+    facade.close()

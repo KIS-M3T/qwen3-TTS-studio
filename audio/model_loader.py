@@ -210,14 +210,12 @@ def lease_model(model_name: str):
 
     Protects the entire sequence 'get_model -> inference -> release':
     1. Acquires _global_execution_lock to prevent conflicting inference or adapter loading.
-    2. Triggers registered Facade unloads to free resident adapter VRAM.
-    3. Retrieves or loads the model via get_model().
-    4. Increments the model lease counter to prevent cache eviction while in use.
-    5. Yields the model for inference.
-    6. Decrements the lease counter upon context exit and releases the lock.
+    2. Atomically triggers registered Facade unloads and retrieves or loads the model via get_model().
+    3. Increments the model lease counter to prevent cache eviction while in use.
+    4. Yields the model for inference.
+    5. Decrements the lease counter upon context exit and releases the lock.
     """
     with _global_execution_lock:
-        trigger_facade_unloads()
         model = get_model(model_name)
         with _model_lock:
             _active_model_leases[model_name] = _active_model_leases.get(model_name, 0) + 1
@@ -242,9 +240,9 @@ def get_model(model_name: str):
         ValueError: If model path doesn't exist
         RuntimeError: If model loading fails
     """
-    trigger_facade_unloads()
-
     with _global_execution_lock:
+        trigger_facade_unloads()
+
         with _model_lock:
             if model_name in loaded_models:
                 loaded_models.move_to_end(model_name)
