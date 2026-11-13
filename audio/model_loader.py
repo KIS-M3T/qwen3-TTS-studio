@@ -132,6 +132,13 @@ def _patch_generate_min_tokens(model, min_new_tokens: int = MIN_NEW_TOKENS_DEFAU
 
 loaded_models: OrderedDict = OrderedDict()
 _model_lock = threading.Lock()
+_facade_unload_callback = None
+
+
+def register_facade_unload_callback(callback) -> None:
+    """Register callback from Engine Facade to unload resident adapter when legacy model loads (J2)."""
+    global _facade_unload_callback
+    _facade_unload_callback = callback
 
 
 def _gpu_cleanup():
@@ -163,6 +170,12 @@ def get_model(model_name: str):
         ValueError: If model path doesn't exist
         RuntimeError: If model loading fails
     """
+    if _facade_unload_callback is not None:
+        try:
+            _facade_unload_callback()
+        except Exception as e:
+            print(f"[MODEL] Warning: Failed to trigger facade unload: {e}")
+
     with _model_lock:
         if model_name in loaded_models:
             loaded_models.move_to_end(model_name)
