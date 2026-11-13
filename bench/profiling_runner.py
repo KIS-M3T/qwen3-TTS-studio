@@ -42,6 +42,7 @@ def run_profiling(
     models: Optional[List[str]] = None,
     iterations: int = 5,
     session_id: Optional[str] = None,
+    resume: bool = False,
     ref_audio_path: str = "bench/reference_voices/ref_voice_it_01.wav",
 ) -> None:
     """Execute performance profiling across configured execution tiers.
@@ -54,7 +55,7 @@ def run_profiling(
     test_cases = SMOKE_TEST_CASES if tier == "smoke" else PROFILING_TEST_CASES
     n_iters = 1 if tier == "smoke" else max(1, iterations)
 
-    session = BenchmarkSession(session_id=session_id)
+    session = BenchmarkSession(session_id=session_id, resume=resume)
     print(f"\n==========================================")
     print(f"PROFILING RUNNER — TIER: {tier.upper()}")
     print(f"Session ID: {session.session_id}")
@@ -123,12 +124,14 @@ def run_profiling(
                         params=dec_params,
                     )
 
-                    # Save WAV and compute SHA-256 (G4, G6, H4)
-                    wav_out_path = session.get_wav_path_for_run(model_id, case_id, it)
-                    t_save_0 = time.perf_counter()
-                    sf.write(str(wav_out_path), res.audio.samples, res.audio.sample_rate)
-                    save_time_sec = time.perf_counter() - t_save_0
-                    wav_sha256 = hashlib.sha256(wav_out_path.read_bytes()).hexdigest()
+                    # Save WAV exclusively and atomically (G4, G6, H4, J1)
+                    rel_wav_path, wav_sha256, save_time_sec = session.save_run_audio(
+                        model_id=model_id,
+                        test_case_id=case_id,
+                        iteration_index=it,
+                        audio_samples=res.audio.samples,
+                        sample_rate=res.audio.sample_rate,
+                    )
 
                     session.record_run(
                         model_id=model_id,
@@ -148,9 +151,9 @@ def run_profiling(
                         applied_params=res.metadata.get("applied_params"),
                         audio_duration_sec=res.audio.duration_sec,
                         inference_time_sec=res.inference_time_sec,
-                        save_time_sec=round(save_time_sec, 4),
+                        save_time_sec=save_time_sec,
                         baseline_process_mb=proc_baseline_mb,
-                        wav_path=str(wav_out_path),
+                        wav_path=str(rel_wav_path),
                         wav_sha256=wav_sha256,
                         checkpoint_revision=checkpoint_revision,
                         config_sha256=config_sha256,
@@ -179,6 +182,7 @@ if __name__ == "__main__":
     parser.add_argument("--models", nargs="+", default=None, help="Models to profile")
     parser.add_argument("--iterations", type=int, default=5, help="Iterations per case (default: 5)")
     parser.add_argument("--session-id", default=None, help="Optional session identifier")
+    parser.add_argument("--resume", action="store_true", help="Explicitly allow resuming an existing session")
     args = parser.parse_args()
 
     run_profiling(
@@ -186,4 +190,5 @@ if __name__ == "__main__":
         models=args.models,
         iterations=args.iterations,
         session_id=args.session_id,
+        resume=args.resume,
     )

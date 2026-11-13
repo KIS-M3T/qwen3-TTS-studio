@@ -244,3 +244,85 @@ def test_benchmark_get_wav_path_for_run():
         assert p1 != p2
         assert p1 != p3
         assert p1.parent == session.wav_dir
+
+
+def test_j1_wav_protection_and_atomic_exclusive_publication():
+    """J1 Mandatory test: Save WAV and event, verify SHA-256; second execution attempt must fail without altering WAV, manifest, or events."""
+    import hashlib
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        session = BenchmarkSession(session_id="safe_audit_session", base_dir=base)
+
+        # 1. First run: generate audio, save exclusively and record
+        samples1 = np.sin(np.linspace(0, 100, 24000, dtype=np.float32)) * 0.5
+        rel_wav, sha_initial, save_sec = session.save_run_audio(
+            model_id="0.6B-Base",
+            test_case_id="NUM_01",
+            iteration_index=1,
+            audio_samples=samples1,
+            sample_rate=24000,
+        )
+        session.record_run(
+            model_id="0.6B-Base",
+            test_case_id="NUM_01",
+            iteration_index=1,
+            input_text_raw="Test phrase",
+            wav_path=str(rel_wav),
+            wav_sha256=sha_initial,
+        )
+
+        full_wav_path = session.session_dir / rel_wav
+        assert full_wav_path.exists()
+        manifest_bytes = session.manifest_file.read_bytes()
+        manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+        events_initial = session.events_file.read_text(encoding="utf-8")
+
+        # 2. Second attempt with different audio on same run identifiers must fail before writing
+        samples_malicious = np.ones(24000, dtype=np.float32) * 0.99
+        with pytest.raises(FileExistsError, match="already"):
+            session.save_run_audio(
+                model_id="0.6B-Base",
+                test_case_id="NUM_01",
+                iteration_index=1,
+                audio_samples=samples_malicious,
+                sample_rate=24000,
+            )
+
+        # 3. Second attempt to record_run with duplicate run_id must fail
+        with pytest.raises(ValueError, match="Duplicate run_id"):
+            session.record_run(
+                model_id="0.6B-Base",
+                test_case_id="NUM_01",
+                iteration_index=1,
+                input_text_raw="Attempted overwrite",
+            )
+
+        # 4. Attempting to instantiate the session again without resume=True must fail
+        with pytest.raises(FileExistsError, match="already exists and contains files"):
+            BenchmarkSession(session_id="safe_audit_session", base_dir=base, resume=False)
+
+        # 5. Invariant check: Original WAV must be 100% untouched
+        current_wav_bytes = full_wav_path.read_bytes()
+        current_wav_sha = hashlib.sha256(current_wav_bytes).hexdigest()
+        assert current_wav_sha == sha_initial
+
+        # 6. Invariant check: environment_manifest.json must be 100% untouched
+        current_manifest_sha = hashlib.sha256(session.manifest_file.read_bytes()).hexdigest()
+        assert current_manifest_sha == manifest_sha
+
+        # 7. Invariant check: events file must contain only the initial single event
+        assert session.events_file.read_text(encoding="utf-8") == events_initial
+
+
+def test_j1_authorized_resume_preserves_manifest():
+    """J1: Verify that an authorized resume=True does NOT overwrite environment_manifest.json."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        s1 = BenchmarkSession(session_id="resume_session", base_dir=base)
+        s1.manifest_file.write_text('{"custom_manifest": true}', encoding="utf-8")
+
+        # Authorized resume
+        s2 = BenchmarkSession(session_id="resume_session", base_dir=base, resume=True)
+        assert s2.manifest_file.read_text(encoding="utf-8") == '{"custom_manifest": true}'
