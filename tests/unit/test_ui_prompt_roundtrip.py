@@ -318,8 +318,11 @@ def test_j3_negative_missing_speaker_embedding_raises_prompt_validation_error():
         voice_dir = base_dir / "missing_embedding_voice"
         voice_dir.mkdir(parents=True, exist_ok=True)
 
-        # Safetensors has sample_0 but lacks sample_1
-        tensors = {"sample_0_ref_spk_embedding": torch.randn(512, dtype=torch.float32)}
+        # Safetensors has sample_0 embedding and sample_1 ref_code, but lacks sample_1 speaker embedding
+        tensors = {
+            "sample_0_ref_spk_embedding": torch.randn(512, dtype=torch.float32),
+            "sample_1_ref_code": torch.tensor([1, 2, 3], dtype=torch.int32),
+        }
         save_file(tensors, str(voice_dir / "voice_prompt.safetensors"))
 
         metadata = {
@@ -357,7 +360,7 @@ def test_j3_negative_inconsistent_sample_count_raises_prompt_validation_error():
         with open(voice_dir / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(metadata, f)
 
-        with pytest.raises(PromptValidationError, match="Sample count mismatch"):
+        with pytest.raises(PromptValidationError, match="(?:Sample count mismatch|Inconsistent sample count)"):
             load_voice_prompt_items(voice_dir, base_dir=base_dir)
 
 
@@ -405,4 +408,100 @@ def test_j3_negative_invalid_tensor_dtype_raises_prompt_validation_error():
         save_file(tensors, str(voice_dir / "voice_prompt.safetensors"))
 
         with pytest.raises(PromptValidationError, match="Invalid speaker embedding dtype"):
+            load_voice_prompt_items(voice_dir, base_dir=base_dir)
+
+
+def test_k3_negative_mandatory_contradictory_flags_missing_ref_code_raises_prompt_validation_error():
+    """K3 Mandatory test: Safetensors with valid embedding, no ref_code, but header declaring has_ref_code=True, icl_mode=True, x_vector_only_mode=False must raise PromptValidationError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_dir = Path(tmpdir)
+        voice_dir = base_dir / "contradictory_flags_voice"
+        voice_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Valid speaker embedding tensor, NO ref_code tensor
+        tensors = {
+            "sample_0_ref_spk_embedding": torch.randn(512, dtype=torch.float32),
+        }
+
+        # 2. Header metadata with contradictory declarations: declares ref_code and ICL mode but tensor is absent
+        samples_meta = [
+            {
+                "index": 0,
+                "has_ref_code": True,
+                "icl_mode": True,
+                "x_vector_only_mode": False,
+                "ref_text": "Trascrizione di test",
+            }
+        ]
+        header = {
+            "schema_version": "1.0",
+            "num_samples": "1",
+            "samples_json": json.dumps(samples_meta),
+        }
+
+        save_file(tensors, str(voice_dir / "voice_prompt.safetensors"), metadata=header)
+
+        # 3. Loading must strictly raise PromptValidationError
+        with pytest.raises(PromptValidationError, match="(Contradictory prompt schema|ref_code tensor is missing)"):
+            load_voice_prompt_items(voice_dir, base_dir=base_dir)
+
+
+def test_k3_negative_contradictory_both_xvec_and_icl_true_raises_prompt_validation_error():
+    """K3 Negative: Sample declaring both x_vector_only_mode=True and icl_mode=True must raise PromptValidationError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_dir = Path(tmpdir)
+        voice_dir = base_dir / "mutually_exclusive_flags_voice"
+        voice_dir.mkdir(parents=True, exist_ok=True)
+
+        tensors = {
+            "sample_0_ref_spk_embedding": torch.randn(512, dtype=torch.float32),
+        }
+        samples_meta = [
+            {
+                "index": 0,
+                "has_ref_code": False,
+                "icl_mode": True,
+                "x_vector_only_mode": True,
+                "ref_text": "Test",
+            }
+        ]
+        header = {
+            "schema_version": "1.0",
+            "num_samples": "1",
+            "samples_json": json.dumps(samples_meta),
+        }
+        save_file(tensors, str(voice_dir / "voice_prompt.safetensors"), metadata=header)
+
+        with pytest.raises(PromptValidationError, match="both x_vector_only_mode and icl_mode are True"):
+            load_voice_prompt_items(voice_dir, base_dir=base_dir)
+
+
+def test_k3_negative_extra_tensor_samples_beyond_declared_raises_prompt_validation_error():
+    """K3 Negative: Safetensors containing tensors for more samples than declared in metadata must raise PromptValidationError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_dir = Path(tmpdir)
+        voice_dir = base_dir / "extra_tensor_samples_voice"
+        voice_dir.mkdir(parents=True, exist_ok=True)
+
+        # 3 samples in safetensors
+        tensors = {
+            "sample_0_ref_spk_embedding": torch.randn(512, dtype=torch.float32),
+            "sample_1_ref_spk_embedding": torch.randn(512, dtype=torch.float32),
+            "sample_2_ref_spk_embedding": torch.randn(512, dtype=torch.float32),
+        }
+        save_file(tensors, str(voice_dir / "voice_prompt.safetensors"))
+
+        # Metadata declares only 2 samples
+        metadata = {
+            "name": "extra_tensor_samples_voice",
+            "num_samples": 2,
+            "samples": [
+                {"index": 0, "transcript": "s0"},
+                {"index": 1, "transcript": "s1"},
+            ],
+        }
+        with open(voice_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+
+        with pytest.raises(PromptValidationError, match="Inconsistent sample count"):
             load_voice_prompt_items(voice_dir, base_dir=base_dir)

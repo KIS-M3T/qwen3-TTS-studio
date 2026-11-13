@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Union
 import torch
 
@@ -381,12 +382,32 @@ def load_voice_prompt_items(
                 )
             return spk_tensor
 
-        # 3. Determine samples specification (H2, J3)
+        # 3. Determine samples specification (H2, J3, K3)
+        # Count actual sample indices present in safetensors (spk_embedding or ref_code)
+        actual_tensor_samples = set()
+        for k in tensors.keys():
+            m = re.match(r"^sample_(\d+)_(?:ref_spk_embedding|ref_code)$", k)
+            if m:
+                actual_tensor_samples.add(int(m.group(1)))
+            elif k in ("ref_spk_embedding", "ref_code"):
+                actual_tensor_samples.add(0)
+
+        actual_tensor_count = len(actual_tensor_samples)
+        if declared_sample_count is not None and actual_tensor_count > 0 and actual_tensor_count != declared_sample_count:
+            raise PromptValidationError(
+                f"Inconsistent sample count in {safe_dir}: declared {declared_sample_count}, but safetensors contains tensors for {actual_tensor_count} sample(s) (K3)"
+            )
+
         raw_samples = header_samples
         if not raw_samples:
             raw_samples = metadata.get("prompt_items") or metadata.get("prompt_metadata") or metadata.get("samples")
 
         if raw_samples is not None and isinstance(raw_samples, list) and len(raw_samples) > 0:
+            if actual_tensor_count > 0 and len(raw_samples) < actual_tensor_count:
+                raise PromptValidationError(
+                    f"Inconsistent sample count in {safe_dir}: metadata declares {len(raw_samples)} samples, but safetensors contains {actual_tensor_count} sample tensors without representation (K3)"
+                )
+
             items: List[VoiceClonePromptItem] = []
             for i, s_info in enumerate(raw_samples):
                 if not isinstance(s_info, dict):
@@ -405,21 +426,59 @@ def load_voice_prompt_items(
 
                 spk_emb = validate_spk_embedding(spk_emb, i)
 
-                # Find ref code tensor
+                # Extract mode declarations
                 has_code_decl = s_info.get("has_ref_code")
+                xvec_decl = s_info.get("x_vector_only_mode")
+                icl_decl = s_info.get("icl_mode")
+
+                # K3: Check contradictory declared flags
+                if xvec_decl is True and icl_decl is True:
+                    raise PromptValidationError(
+                        f"Contradictory prompt schema for sample {i}: both x_vector_only_mode and icl_mode are True (K3)"
+                    )
+                if has_code_decl is False and icl_decl is True:
+                    raise PromptValidationError(
+                        f"Contradictory prompt schema for sample {i}: icl_mode is True but has_ref_code is False (K3)"
+                    )
+                if has_code_decl is True and xvec_decl is True:
+                    raise PromptValidationError(
+                        f"Contradictory prompt schema for sample {i}: x_vector_only_mode is True but has_ref_code is True (K3)"
+                    )
+
+                # Find ref code tensor
                 ref_code = tensors.get(f"sample_{idx}_ref_code")
                 if ref_code is None:
                     ref_code = tensors.get(f"sample_{i}_ref_code")
                 if ref_code is None and i == 0:
                     ref_code = tensors.get("ref_code")
 
-                if has_code_decl is False:
-                    ref_code = None
-
-                if ref_code is not None and not isinstance(ref_code, torch.Tensor):
+                # K3: Validate presence of ref_code against declared mode
+                if has_code_decl is True and ref_code is None:
                     raise PromptValidationError(
-                        f"Ref code for sample {i} must be a torch.Tensor, got {type(ref_code)}"
+                        f"Contradictory prompt schema for sample {i}: declared has_ref_code=True but ref_code tensor is missing in safetensors (K3)"
                     )
+                if icl_decl is True and ref_code is None:
+                    raise PromptValidationError(
+                        f"Contradictory prompt schema for sample {i}: declared icl_mode=True but ref_code tensor is missing in safetensors (K3)"
+                    )
+                if xvec_decl is False and has_code_decl is not False and ref_code is None:
+                    raise PromptValidationError(
+                        f"Contradictory prompt schema for sample {i}: declared x_vector_only_mode=False but ref_code tensor is missing in safetensors (K3)"
+                    )
+
+                if ref_code is not None:
+                    if has_code_decl is False:
+                        raise PromptValidationError(
+                            f"Contradictory prompt schema for sample {i}: ref_code tensor is present but declared has_ref_code=False (K3)"
+                        )
+                    if xvec_decl is True:
+                        raise PromptValidationError(
+                            f"Contradictory prompt schema for sample {i}: ref_code tensor is present but declared x_vector_only_mode=True (K3)"
+                        )
+                    if not isinstance(ref_code, torch.Tensor):
+                        raise PromptValidationError(
+                            f"Ref code for sample {i} must be a torch.Tensor, got {type(ref_code)}"
+                        )
 
                 # Reconcile text
                 ref_txt = (
