@@ -85,8 +85,12 @@ def _should_preserve_final_dot(text: str, start: int, end: int, is_ecc_alias: bo
     """Return True when an abbreviation period doubles as a sentence-ending full stop."""
     tail = text[end:]
     if _SENTENCE_END_WS.match(tail):
-        stripped = text.lstrip()
-        return bool(stripped and (stripped[0].isupper() or "," in text[:start]))
+        prefix = text[:start].strip()
+        if not prefix:
+            return False
+        if is_ecc_alias:
+            return True
+        return prefix[0].isupper() or any(ch in prefix for ch in ".,;!?:")
     if is_ecc_alias and _NEXT_SENTENCE_START.match(tail):
         return True
     return False

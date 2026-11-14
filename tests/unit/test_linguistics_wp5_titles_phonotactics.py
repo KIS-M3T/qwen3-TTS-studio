@@ -310,3 +310,89 @@ class TestWP5CompositeCorpusOffsetsIdempotenceAndLatency:
         times.sort()
         p95 = times[int(len(times) * 0.95)]
         assert p95 < 3.0, f"WP5 p95 latency {p95:.3f} ms exceeds 3.0 ms gate"
+
+    def test_wp5_b1_ecc_final_punctuation_and_internal_abbreviations(self):
+        """WP5-B1: Preserve sentence-final period on lowercase/multi-sentence 'ecc.' without internal dots."""
+        normalizer = ItalianTextNormalizer()
+
+        # Lowercase start & no comma before sentence-final 'ecc.' -> preserve dot
+        assert normalizer.normalize("serve carta e penne ecc.").normalized_text == (
+            "serve carta e penne eccetera."
+        )
+        # Multi-sentence ending in 'ecc.' -> preserve dot
+        assert normalizer.normalize("prima frase. seconda frase con penne ecc.").normalized_text == (
+            "prima frase. seconda frase con penne eccetera."
+        )
+        # Multi-sentence where first sentence ends with 'ecc.' -> preserve dot
+        assert normalizer.normalize("prendi penne ecc. Poi usciamo.").normalized_text == (
+            "prendi penne eccetera. Poi usciamo."
+        )
+
+        # Negative checks: internal abbreviations must NOT get arbitrary periods; 'il dott.' stays intact
+        assert normalizer.normalize("prendi penne, ecc. e matite poi esci.").normalized_text == (
+            "prendi penne, eccetera e matite poi esci."
+        )
+        assert normalizer.normalize("vedi pag. 4 del manuale.").normalized_text == (
+            "vedi pagina quattro del manuale."
+        )
+        assert normalizer.normalize("il dott.").normalized_text == "il dottore"
+
+    def test_wp5_b2_proclitic_da_verb_with_temporal_adverbs_vs_prepositions(self):
+        """WP5-B2: Proclitic pronoun + 'da' normalizes to 'dà' even before temporal adverbs; prepositions stay No-Op."""
+        normalizer = ItalianTextNormalizer()
+
+        # Positive verbal readings before temporal adverbs
+        assert normalizer.normalize("Mi da oggi una risposta.").normalized_text == (
+            "Mi dà oggi una risposta."
+        )
+        assert normalizer.normalize("Mi da sempre fastidio.").normalized_text == (
+            "Mi dà sempre fastidio."
+        )
+        assert normalizer.normalize("Glielo da domani senza problemi.").normalized_text == (
+            "Glielo dà domani senza problemi."
+        )
+        assert normalizer.normalize("Ci da ieri sera un segnale?").normalized_text == (
+            "Ci dà ieri sera un segnale?"
+        )
+        assert normalizer.normalize("Se ne da pensiero?").normalized_text == (
+            "Se ne dà pensiero?"
+        )
+
+        # Negative prepositional / ambiguous / Roman-numeral contexts stay strictly No-Op
+        for noop_text in (
+            "Lui da sempre aiuta gli amici.",
+            "Lui viene da Roma oggi.",
+            "Il pacco da consegnare domani è pronto.",
+            "Da oggi cambia tutto.",
+            "Paolo VI da giovane studiava molto.",
+        ):
+            res = normalizer.normalize(noop_text)
+            assert res.normalized_text == noop_text
+            assert res.annotations == []
+
+    def test_wp5_b3_all_caps_accent_normalization_and_d4b_compliance(self):
+        """WP5-B3: Accent normalization preserves ALL-CAPS casing and respects D4.B closed catalog."""
+        normalizer = ItalianTextNormalizer()
+
+        r1 = normalizer.normalize("PERCHÈ NON RISPONDI AFFINCHÈ CAPISCA?")
+        assert r1.normalized_text == "PERCHÉ NON RISPONDI AFFINCHÉ CAPISCA?"
+        assert r1.normalized_text.isupper()
+        for ann in r1.annotations:
+            assert r1.raw_text[ann.char_start:ann.char_end] == ann.raw_span
+
+        r2 = normalizer.normalize("Perchè parli NÈ più nè meno, QUAL'È il punto?")
+        assert r2.normalized_text == "Perché parli NÉ più né meno, QUAL È il punto?"
+
+        # D4.B & conservative uppercase boundaries remain untouched
+        for d4b_noop in (
+            "IKEA E BMW DA SE",
+            "MI DA SEMPRE",
+            "NATO E ISTAT",
+        ):
+            res = normalizer.normalize(d4b_noop)
+            assert res.normalized_text == d4b_noop
+            assert res.annotations == []
+
+        # Idempotence on all-caps normalized output
+        assert normalizer.normalize(r1.normalized_text).normalized_text == r1.normalized_text
+        assert normalizer.normalize(r1.normalized_text).annotations == []

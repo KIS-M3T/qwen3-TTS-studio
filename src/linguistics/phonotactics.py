@@ -72,14 +72,22 @@ _SE_TERMINAL_PREP_PATTERN = re.compile(
 
 # High-certainty proclitic pronoun frames where 'da' is unmistakably verb 'dà'
 _DA_VERB_PATTERN = re.compile(
-    r"(?<![A-Za-zÀ-ÖØ-öø-ÿ])(?:mi|ti|gli|ci|vi|si|glielo|gliela|glieli|gliele|gliene|melo|telo|celo|velo|me[ \t]+lo|te[ \t]+lo|ce[ \t]+lo|ve[ \t]+lo|me[ \t]+la|te[ \t]+la|ce[ \t]+la|ve[ \t]+la)[ \t]+(?P<verb>da)(?![A-Za-z0-9_À-ÖØ-öø-ÿ]|[ \t]+(?:sempre|oggi|ieri|domani|anni|mesi|giorni|ore|minuti|lontano|vicino|casa|scuola|lavoro|Roma|Milano)\b)",
+    r"(?<![A-Za-zÀ-ÖØ-öø-ÿ])(?P<pro>mi|ti|gli|ci|vi|si|glielo|gliela|glieli|gliele|gliene|"
+    r"melo|telo|celo|velo|me[ \t]+lo|te[ \t]+lo|ce[ \t]+lo|ve[ \t]+lo|"
+    r"me[ \t]+la|te[ \t]+la|ce[ \t]+la|ve[ \t]+la|"
+    r"me[ \t]+ne|te[ \t]+ne|ce[ \t]+ne|ve[ \t]+ne|se[ \t]+ne)[ \t]+(?P<verb>da)"
+    r"(?![A-Za-z0-9_À-ÖØ-öø-ÿ])",
     re.IGNORECASE,
 )
 
 
-def _preserve_initial_case(source: str, target: str) -> str:
-    """Match leading uppercase if the source token started with uppercase."""
-    if source and source[0].isupper():
+def _preserve_case(source: str, target: str) -> str:
+    """Preserve all-uppercase or initial-uppercase casing from source onto target."""
+    if not source:
+        return target
+    if source.isupper():
+        return target.upper()
+    if source[0].isupper():
         return target[0].upper() + target[1:]
     return target
 
@@ -125,8 +133,7 @@ class PhonotacticNormalizer:
             if "qual" in text.lower():
                 for m in _ERRONEOUS_QUAL_E_PATTERN.finditer(text):
                     start, end = m.span()
-                    qual = _preserve_initial_case(m.group("word"), "qual")
-                    add_candidate(start, end, f"{qual} è")
+                    add_candidate(start, end, _preserve_case(m.group(0), "qual è"))
 
         # 2. Accent grave -> acute ('perchè' -> 'perché') and 'se'/'da' disambiguation
         if normalize_accent_gravis_acutus:
@@ -136,7 +143,7 @@ class PhonotacticNormalizer:
                     raw_word = m.group("word")
                     fixed = _GRAVE_TO_ACUTE_MAP.get(raw_word.lower())
                     if fixed is not None:
-                        add_candidate(start, end, _preserve_initial_case(raw_word, fixed))
+                        add_candidate(start, end, _preserve_case(raw_word, fixed))
 
             text_lower = text.lower()
             if " se" in text_lower or "\tse" in text_lower:
@@ -149,10 +156,11 @@ class PhonotacticNormalizer:
 
             if " da" in text_lower or "\tda" in text_lower:
                 for m in _DA_VERB_PATTERN.finditer(text):
-                    start, end = m.span("verb")
+                    raw_pro = m.group("pro")
                     raw_verb = m.group("verb")
-                    if raw_verb.islower():
-                        add_candidate(start, end, "dà")
+                    if raw_pro.isupper() or not raw_verb.islower():
+                        continue
+                    add_candidate(m.span("verb")[0], m.span("verb")[1], "dà")
 
         if not candidates:
             return text
