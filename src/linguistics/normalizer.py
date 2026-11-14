@@ -8,10 +8,12 @@ from src.linguistics.config import ItalianNormalizerConfig
 from src.linguistics.currencies import CurrencyNormalizer
 from src.linguistics.dates import DateNormalizer
 from src.linguistics.exceptions import LinguisticNormalizationError
+from src.linguistics.numbers import NumberNormalizer
 from src.linguistics.shielding import EntityShieldManager
 from src.linguistics.times import TimeNormalizer
 from src.linguistics.tracker import OffsetTracker
 from src.linguistics.types import NormalizedText
+from src.linguistics.units import UnitsNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,17 @@ class ItalianTextNormalizer(BaseTextNormalizer):
                 tracker.current_text, tracker, register=self.config.currency_register
             )
 
-        # Intermediate Stages 4-7 will execute on tracker.current_text in WP4-WP5.
+        # Stage 4: Units of Measure and Percentages (WP4)
+        if self.config.enable_units:
+            UnitsNormalizer.normalize_units(tracker.current_text, tracker)
+
+        # Stage 5: Cardinals, Decimals, Ordinals, Centuries, Phones & Codes (WP4)
+        if self.config.enable_numbers:
+            NumberNormalizer.normalize_numbers(
+                tracker.current_text, tracker, phone_mode=self.config.phone_reading_mode
+            )
+
+        # Intermediate Stages 6-7 will execute on tracker.current_text in WP5.
         intermediate_text = tracker.current_text
 
         # Stage 8: Entity Deshielding & Validation (WP1-B2)
@@ -109,7 +121,7 @@ class ItalianTextNormalizer(BaseTextNormalizer):
             normalized_text=final_text,
             annotations=tracker.annotations,
             metadata={
-                "pipeline_stage": "wp3_currencies",
+                "pipeline_stage": "wp4_numbers",
                 "shielded_entities_count": len(shielded_entities),
                 "annotations_count": len(tracker.annotations),
             },

@@ -37,6 +37,12 @@ class ItalianNormalizerConfig:
     # Stage 3: Monetary amounts and currencies - WP3
     enable_currencies: bool = True
 
+    # Stage 4: Units of measure and percentages - WP4
+    enable_units: bool = True
+
+    # Stage 5: Cardinals, decimals, ordinals, centuries, phones, postal/alphanumeric codes - WP4
+    enable_numbers: bool = True
+
     # Stage 7: Phonotactic elision & accent normalization rules
     preserve_apostrophes: bool = True
     normalize_accent_gravis_acutus: bool = True
