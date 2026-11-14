@@ -2,6 +2,7 @@
 
 from src.linguistics.base import BaseTextNormalizer
 from src.linguistics.config import ItalianNormalizerConfig
+from src.linguistics.currencies import CurrencyNormalizer
 from src.linguistics.dates import DateNormalizer
 from src.linguistics.exceptions import (
     EntityShieldingCorruptionError,
@@ -27,6 +28,7 @@ __all__ = [
     "OffsetTracker",
     "DateNormalizer",
     "TimeNormalizer",
+    "CurrencyNormalizer",
     "cardinal_to_italian",
     "ordinal_to_italian",
     "NormalizedText",

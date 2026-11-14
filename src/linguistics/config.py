@@ -34,6 +34,9 @@ class ItalianNormalizerConfig:
     enable_dates: bool = True
     enable_times: bool = True
 
+    # Stage 3: Monetary amounts and currencies - WP3
+    enable_currencies: bool = True
+
     # Stage 7: Phonotactic elision & accent normalization rules
     preserve_apostrophes: bool = True
     normalize_accent_gravis_acutus: bool = True

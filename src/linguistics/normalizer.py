@@ -5,6 +5,7 @@ from typing import Optional
 
 from src.linguistics.base import BaseTextNormalizer
 from src.linguistics.config import ItalianNormalizerConfig
+from src.linguistics.currencies import CurrencyNormalizer
 from src.linguistics.dates import DateNormalizer
 from src.linguistics.exceptions import LinguisticNormalizationError
 from src.linguistics.shielding import EntityShieldManager
@@ -84,7 +85,13 @@ class ItalianTextNormalizer(BaseTextNormalizer):
         if self.config.enable_times:
             TimeNormalizer.normalize_times(tracker.current_text, tracker)
 
-        # Intermediate Stages 3-7 will execute on tracker.current_text in WP3-WP5.
+        # Stage 3: Monetary Amounts and Currencies (WP3)
+        if self.config.enable_currencies:
+            CurrencyNormalizer.normalize_currencies(
+                tracker.current_text, tracker, register=self.config.currency_register
+            )
+
+        # Intermediate Stages 4-7 will execute on tracker.current_text in WP4-WP5.
         intermediate_text = tracker.current_text
 
         # Stage 8: Entity Deshielding & Validation (WP1-B2)
@@ -102,7 +109,7 @@ class ItalianTextNormalizer(BaseTextNormalizer):
             normalized_text=final_text,
             annotations=tracker.annotations,
             metadata={
-                "pipeline_stage": "wp2_temporal",
+                "pipeline_stage": "wp3_currencies",
                 "shielded_entities_count": len(shielded_entities),
                 "annotations_count": len(tracker.annotations),
             },
