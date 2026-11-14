@@ -1,0 +1,21 @@
+{
+  "dott.ssa": {"full": "dottoressa", "apocope": null},
+  "dr.ssa": {"full": "dottoressa", "apocope": null},
+  "prof.ssa": {"full": "professoressa", "apocope": null},
+  "sig.ra": {"full": "signora", "apocope": null},
+  "sig.na": {"full": "signorina", "apocope": null},
+  "sigg.": {"full": "signori", "apocope": null},
+  "dott.": {"full": "dottore", "apocope": "dottor"},
+  "dr.": {"full": "dottore", "apocope": "dottor"},
+  "prof.": {"full": "professore", "apocope": "professor"},
+  "ing.": {"full": "ingegnere", "apocope": "ingegner"},
+  "rag.": {"full": "ragioniere", "apocope": "ragionier"},
+  "sig.": {"full": "signore", "apocope": "signor"},
+  "mons.": {"full": "monsignore", "apocope": "monsignor"},
+  "comm.": {"full": "commendatore", "apocope": "commendator"},
+  "sen.": {"full": "senatore", "apocope": "senator"},
+  "avv.": {"full": "avvocato", "apocope": null},
+  "arch.": {"full": "architetto", "apocope": null},
+  "geom.": {"full": "geometra", "apocope": null},
+  "on.": {"full": "onorevole", "apocope": null}
+}

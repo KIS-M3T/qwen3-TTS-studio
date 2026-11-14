@@ -9,8 +9,10 @@ from src.linguistics.currencies import CurrencyNormalizer
 from src.linguistics.dates import DateNormalizer
 from src.linguistics.exceptions import LinguisticNormalizationError
 from src.linguistics.numbers import NumberNormalizer
+from src.linguistics.phonotactics import PhonotacticNormalizer
 from src.linguistics.shielding import EntityShieldManager
 from src.linguistics.times import TimeNormalizer
+from src.linguistics.titles import TitlesAcronymsNormalizer
 from src.linguistics.tracker import OffsetTracker
 from src.linguistics.types import NormalizedText
 from src.linguistics.units import UnitsNormalizer
@@ -103,7 +105,27 @@ class ItalianTextNormalizer(BaseTextNormalizer):
                 tracker.current_text, tracker, phone_mode=self.config.phone_reading_mode
             )
 
-        # Intermediate Stages 6-7 will execute on tracker.current_text in WP5.
+        # Stage 6: Professional Titles, Common Abbreviations & Closed Acronyms (WP5)
+        if self.config.enable_titles or self.config.enable_abbreviations or self.config.enable_acronyms:
+            TitlesAcronymsNormalizer.normalize_titles_and_acronyms(
+                tracker.current_text,
+                tracker,
+                enable_titles=self.config.enable_titles,
+                enable_abbreviations=self.config.enable_abbreviations,
+                enable_acronyms=self.config.enable_acronyms,
+                strict_acronym_dictionary=self.config.strict_acronym_dictionary,
+            )
+
+        # Stage 7: Phonotactic Refinement, Elisions & Standard Accents (WP5)
+        if self.config.enable_phonotactics:
+            PhonotacticNormalizer.normalize_phonotactics(
+                tracker.current_text,
+                tracker,
+                preserve_apostrophes=self.config.preserve_apostrophes,
+                normalize_accent_gravis_acutus=self.config.normalize_accent_gravis_acutus,
+                enable_homograph_disambiguation=self.config.enable_homograph_disambiguation,
+            )
+
         intermediate_text = tracker.current_text
 
         # Stage 8: Entity Deshielding & Validation (WP1-B2)
@@ -121,7 +143,7 @@ class ItalianTextNormalizer(BaseTextNormalizer):
             normalized_text=final_text,
             annotations=tracker.annotations,
             metadata={
-                "pipeline_stage": "wp4_numbers",
+                "pipeline_stage": "wp5_phonotactics",
                 "shielded_entities_count": len(shielded_entities),
                 "annotations_count": len(tracker.annotations),
             },

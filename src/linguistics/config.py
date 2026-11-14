@@ -43,7 +43,13 @@ class ItalianNormalizerConfig:
     # Stage 5: Cardinals, decimals, ordinals, centuries, phones, postal/alphanumeric codes - WP4
     enable_numbers: bool = True
 
-    # Stage 7: Phonotactic elision & accent normalization rules
+    # Stage 6: Professional titles, common abbreviations, and closed-dictionary acronyms - WP5
+    enable_titles: bool = True
+    enable_abbreviations: bool = True
+    enable_acronyms: bool = True
+
+    # Stage 7: Phonotactic elision & accent normalization rules - WP5
+    enable_phonotactics: bool = True
     preserve_apostrophes: bool = True
     normalize_accent_gravis_acutus: bool = True
 

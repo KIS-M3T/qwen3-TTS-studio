@@ -1,0 +1,62 @@
+{
+  "simple": {
+    "ecc.": {"expansion": "eccetera", "require_lowercase": false, "forbid_all_caps": false},
+    "etc.": {"expansion": "eccetera", "require_lowercase": false, "forbid_all_caps": false},
+    "pagg.": {"expansion": "pagine", "require_lowercase": false, "forbid_all_caps": false},
+    "pag.": {"expansion": "pagina", "require_lowercase": false, "forbid_all_caps": false},
+    "p.zza": {"expansion": "piazza", "require_lowercase": false, "forbid_all_caps": false},
+    "p.za": {"expansion": "piazza", "require_lowercase": false, "forbid_all_caps": false},
+    "v.le": {"expansion": "viale", "require_lowercase": false, "forbid_all_caps": false},
+    "c.so": {"expansion": "corso", "require_lowercase": false, "forbid_all_caps": false},
+    "l.go": {"expansion": "largo", "require_lowercase": false, "forbid_all_caps": false},
+    "tel.": {"expansion": "telefono", "require_lowercase": false, "forbid_all_caps": false},
+    "par.": {"expansion": "paragrafo", "require_lowercase": false, "forbid_all_caps": false},
+    "sez.": {"expansion": "sezione", "require_lowercase": false, "forbid_all_caps": false},
+    "tab.": {"expansion": "tabella", "require_lowercase": false, "forbid_all_caps": false},
+    "fig.": {"expansion": "figura", "require_lowercase": false, "forbid_all_caps": false},
+    "art.": {"expansion": "articolo", "require_lowercase": false, "forbid_all_caps": true},
+    "vol.": {"expansion": "volume", "require_lowercase": false, "forbid_all_caps": false},
+    "all.": {"expansion": "allegato", "require_lowercase": false, "forbid_all_caps": true},
+    "cap.": {"expansion": "capitolo", "require_lowercase": false, "forbid_all_caps": true},
+    "es.": {"expansion": "esempio", "require_lowercase": false, "forbid_all_caps": true},
+    "ca.": {"expansion": "circa", "require_lowercase": false, "forbid_all_caps": true},
+    "nr.": {"expansion": "numero", "require_lowercase": false, "forbid_all_caps": true},
+    "n.": {"expansion": "numero", "require_lowercase": true, "forbid_all_caps": true}
+  },
+  "cfr": {
+    "masculine_il_targets": [
+      "capitolo",
+      "paragrafo",
+      "volume",
+      "grafico",
+      "testo",
+      "manuale",
+      "punto",
+      "comma",
+      "passo",
+      "glossario",
+      "saggio",
+      "bilancio",
+      "documento",
+      "decreto"
+    ],
+    "feminine_la_targets": [
+      "sezione",
+      "tabella",
+      "figura",
+      "nota",
+      "pagina",
+      "voce",
+      "legge",
+      "norma",
+      "circolare"
+    ],
+    "l_apostrophe_targets": [
+      "articolo",
+      "allegato",
+      "elenco",
+      "appendice",
+      "opera"
+    ]
+  }
+}

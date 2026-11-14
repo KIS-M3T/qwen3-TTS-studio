@@ -12,8 +12,10 @@ from src.linguistics.identity import IdentityNormalizer
 from src.linguistics.normalizer import ItalianTextNormalizer
 from src.linguistics.numbers import NumberNormalizer
 from src.linguistics.numbers_core import cardinal_to_italian, ordinal_to_italian
+from src.linguistics.phonotactics import PhonotacticNormalizer
 from src.linguistics.shielding import EntityShieldManager, ShieldedEntity
 from src.linguistics.times import TimeNormalizer
+from src.linguistics.titles import TitlesAcronymsNormalizer
 from src.linguistics.tracker import OffsetTracker
 from src.linguistics.types import NormalizedText, TNAnnotation
 from src.linguistics.units import UnitsNormalizer
@@ -33,6 +35,8 @@ __all__ = [
     "CurrencyNormalizer",
     "UnitsNormalizer",
     "NumberNormalizer",
+    "TitlesAcronymsNormalizer",
+    "PhonotacticNormalizer",
     "cardinal_to_italian",
     "ordinal_to_italian",
     "NormalizedText",
