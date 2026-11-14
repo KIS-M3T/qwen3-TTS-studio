@@ -1,4 +1,8 @@
-"""Unit tests for Milestone M2 Workpackage WP1 (Core Shielding, Offset Tracker & Shared Core Numbers)."""
+"""Unit tests for Milestone M2 Workpackage WP1 (Core Shielding, Offset Tracker & Shared Core Numbers).
+
+Covers regression verifications for reviewer defects WP1-B1, WP1-B2, WP1-B3,
+and numbers_core parameter validation (S1, S3, P4).
+"""
 
 import pytest
 
@@ -15,92 +19,136 @@ from src.linguistics import (
 
 
 class TestWP1EntityShielding:
-    """Verifies Stage 1 (Shielding) and Stage 8 (Deshielding) entity preservation (R1, R2, S3, P4)."""
+    """Verifies Stage 1 (Shielding) and Stage 8 (Deshielding) entity preservation (WP1-B2, WP1-B3)."""
 
-    def test_shield_and_deshield_url(self):
-        """Verify URL with query parameters, slashes and dots is preserved intact."""
-        text = "Visita il sito https://www.uniroma1.it/it/ateneo?v=1&k=2 per informazioni."
-        shielded, entities = EntityShieldManager.shield(text)
+    def test_shield_and_deshield_url_with_port_query_fragment(self):
+        """Verify WP1-B3: URL with port, query params and fragment is protected with exact span check."""
+        text = "Visita il server http://localhost:8080/api/v1?id=10&k=2#sec per i dettagli."
+        shielded, entities, nonce = EntityShieldManager.shield(text)
+
         assert len(entities) == 1
-        assert entities[0].category == "url"
-        assert entities[0].original_text == "https://www.uniroma1.it/it/ateneo?v=1&k=2"
-        assert entities[0].placeholder in shielded
+        ent = entities[0]
+        assert ent.category == "url"
+        expected_url = "http://localhost:8080/api/v1?id=10&k=2#sec"
+        assert ent.original_text == expected_url
 
-        restored = EntityShieldManager.deshield(shielded, entities)
+        # WP1-B3: Check exact protected interval on original text
+        assert ent.char_start == 17
+        assert ent.char_end == 17 + len(expected_url)
+        assert text[ent.char_start:ent.char_end] == expected_url
+
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
+        assert restored == text
+
+    def test_shield_and_deshield_www_address(self):
+        """Verify WP1-B3: www. address without http:// protocol is shielded with exact coordinates."""
+        text = "Consulta www.uniroma1.it/didattica/corsi?anno=2026#orari per l'orario."
+        shielded, entities, nonce = EntityShieldManager.shield(text)
+
+        assert len(entities) == 1
+        ent = entities[0]
+        assert ent.category == "url"
+        expected_url = "www.uniroma1.it/didattica/corsi?anno=2026#orari"
+        assert ent.original_text == expected_url
+
+        # WP1-B3: Verify exact slice matching
+        assert text[ent.char_start:ent.char_end] == expected_url
+        assert ent.char_start == text.index("www.uniroma1.it")
+        assert ent.char_end == ent.char_start + len(expected_url)
+
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
         assert restored == text
 
     def test_shield_and_deshield_email(self):
         """Verify email address is shielded and restored faithfully."""
         text = "Invia una mail a info.supporto@studio-legale.it entro domani."
-        shielded, entities = EntityShieldManager.shield(text)
+        shielded, entities, nonce = EntityShieldManager.shield(text)
         assert len(entities) == 1
         assert entities[0].category == "email"
         assert entities[0].original_text == "info.supporto@studio-legale.it"
 
-        restored = EntityShieldManager.deshield(shielded, entities)
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
         assert restored == text
 
     def test_shield_and_deshield_windows_path(self):
         """Verify Windows file path with drive letter and backslashes is shielded."""
         text = r"Il file si trova in C:\Windows\System32\drivers\etc\hosts sul server."
-        shielded, entities = EntityShieldManager.shield(text)
+        shielded, entities, nonce = EntityShieldManager.shield(text)
         assert len(entities) == 1
         assert entities[0].category == "path_windows"
         assert entities[0].original_text == r"C:\Windows\System32\drivers\etc\hosts"
 
-        restored = EntityShieldManager.deshield(shielded, entities)
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
         assert restored == text
 
     def test_shield_and_deshield_posix_path(self):
         """Verify POSIX path starting with system directory is shielded."""
         text = "Controlla la configurazione in /etc/nginx/nginx.conf prima del riavvio."
-        shielded, entities = EntityShieldManager.shield(text)
+        shielded, entities, nonce = EntityShieldManager.shield(text)
         assert len(entities) == 1
         assert entities[0].category == "path_posix"
         assert entities[0].original_text == "/etc/nginx/nginx.conf"
 
-        restored = EntityShieldManager.deshield(shielded, entities)
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
         assert restored == text
 
     def test_shield_and_deshield_uuid(self):
         """Verify standard 36-char UUID is shielded."""
         text = "La chiave di sessione è 550e8400-e29b-41d4-a716-446655440000 nel database."
-        shielded, entities = EntityShieldManager.shield(text)
+        shielded, entities, nonce = EntityShieldManager.shield(text)
         assert len(entities) == 1
         assert entities[0].category == "uuid"
         assert entities[0].original_text == "550e8400-e29b-41d4-a716-446655440000"
 
-        restored = EntityShieldManager.deshield(shielded, entities)
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
         assert restored == text
 
     def test_shield_technical_codes(self):
         """Verify technical hyphenated codes (ISO-9001, F-16, COVID-19) are shielded."""
         text = "Lo standard ISO-9001, il velivolo F-16 e il virus COVID-19."
-        shielded, entities = EntityShieldManager.shield(text)
+        shielded, entities, nonce = EntityShieldManager.shield(text)
         assert len(entities) == 3
         codes = [e.original_text for e in entities]
         assert "ISO-9001" in codes
         assert "F-16" in codes
         assert "COVID-19" in codes
 
-        restored = EntityShieldManager.deshield(shielded, entities)
+        restored = EntityShieldManager.deshield(shielded, entities, session_nonce=nonce)
         assert restored == text
 
     def test_overlap_priority_url_over_path(self):
         """Verify URL takes priority over internal path segments."""
         text = "Vedi https://server.com/etc/hosts per dettagli."
-        shielded, entities = EntityShieldManager.shield(text)
+        shielded, entities, nonce = EntityShieldManager.shield(text)
         assert len(entities) == 1
         assert entities[0].category == "url"
         assert entities[0].original_text == "https://server.com/etc/hosts"
 
-    def test_placeholder_non_collision_with_user_text(self):
-        """Verify that user text containing literal placeholder strings does not collide."""
-        text = "Il testo contiene §§§SHIELD_0§§§ e __PROTECTED_ENTITY_1__ come stringhe."
-        shielded, entities = EntityShieldManager.shield(text)
-        # The user strings should not be corrupted or misinterpreted as active placeholders
-        restored = EntityShieldManager.deshield(shielded, entities)
-        assert restored == text
+    def test_wp1_b2_user_literal_placeholder_preservation(self):
+        """Verify WP1-B2: user literal string containing §§§SHIELD_deadbeef1234_0§§§ passes cleanly."""
+        text = "Visita https://example.org e scrivi §§§SHIELD_deadbeef1234_0§§§"
+        normalizer = ItalianTextNormalizer()
+        res = normalizer.normalize(text)
+        # Must pass without exceptions and leave the user's literal string intact
+        assert res.normalized_text == text
+        assert res.raw_text == text
+
+    def test_deshield_raises_on_corrupted_placeholder(self):
+        """Verify WP1-B2: EntityShieldingCorruptionError is raised if placeholder is altered."""
+        text = "Visita https://example.org per info."
+        shielded, entities, nonce = EntityShieldManager.shield(text)
+        corrupted = shielded.replace("§§§SHIELD_", "§§§MUTATED_")
+        with pytest.raises(EntityShieldingCorruptionError, match="lost or corrupted"):
+            EntityShieldManager.deshield(corrupted, entities, session_nonce=nonce)
+
+    def test_deshield_raises_on_duplicated_placeholder(self):
+        """Verify WP1-B2: EntityShieldingCorruptionError is raised if placeholder is duplicated."""
+        text = "Visita https://example.org per info."
+        shielded, entities, nonce = EntityShieldManager.shield(text)
+        # Duplicate the placeholder
+        duplicated = shielded + " e ancora " + entities[0].placeholder
+        with pytest.raises(EntityShieldingCorruptionError, match="duplicated"):
+            EntityShieldManager.deshield(duplicated, entities, session_nonce=nonce)
 
     def test_composite_shielding_with_unicode(self):
         """Corresponds to M2-TC-081: URL + UUID + multi-byte quotes («, ») + prices."""
@@ -111,68 +159,100 @@ class TestWP1EntityShielding:
         normalizer = ItalianTextNormalizer()
         res = normalizer.normalize(text)
         assert res.raw_text == text
-        # URL, UUID and typographic quotes must remain completely intact
         assert "https://test.org/id?v=1&k=2" in res.normalized_text
         assert "550e8400-e29b-41d4-a716-446655440000" in res.normalized_text
         assert "«speciali»" in res.normalized_text
 
-    def test_deshield_raises_on_corrupted_placeholder(self):
-        """Verify EntityShieldingCorruptionError is raised if placeholder is altered."""
-        text = "Visita https://example.org per info."
-        shielded, entities = EntityShieldManager.shield(text)
-        # Corrupt the placeholder in intermediate text
-        corrupted = shielded.replace("§§§SHIELD_", "§§§MUTATED_")
-        with pytest.raises(EntityShieldingCorruptionError, match="lost or corrupted"):
-            EntityShieldManager.deshield(corrupted, entities)
-
 
 class TestWP1OffsetTracker:
-    """Verifies coordinate mapping and delta compensation in OffsetTracker."""
+    """Verifies coordinate mapping, delta compensation and WP1-B1 requirements."""
 
-    def test_single_replacement_offset_mapping(self):
-        """Verify single replacement maps original coordinates exactly."""
-        raw = "Ho speso 50 € per il pranzo."
+    def test_wp1_b1_at_least_three_sequential_replacements(self):
+        """Verify WP1-B1: at least 3 length-changing replacements across the sentence."""
+        raw = "Pagati 10 € per pane, 20 € per pasta e 30 € per frutta."
         tracker = OffsetTracker(raw)
-        # Replace "50 €" (indices 9..13 in raw, length 4) with "cinquanta euro" (length 14)
-        ann = tracker.record_replacement(
-            intermediate_start=9,
-            intermediate_end=13,
-            replacement="cinquanta euro",
-            category="currency",
+
+        # 1st replacement: '10 €' at index 7..11 in raw (length 4 -> 14)
+        tracker.record_replacement(7, 11, "dieci euro", "currency")
+        assert raw[tracker.annotations[0].char_start:tracker.annotations[0].char_end] == "10 €"
+
+        # 2nd replacement: find '20 €' in intermediate text
+        idx2 = tracker.current_text.index("20 €")
+        tracker.record_replacement(idx2, idx2 + 4, "venti euro", "currency")
+        assert raw[tracker.annotations[1].char_start:tracker.annotations[1].char_end] == "20 €"
+
+        # 3rd replacement: find '30 €' in intermediate text
+        idx3 = tracker.current_text.index("30 €")
+        tracker.record_replacement(idx3, idx3 + 4, "trenta euro", "currency")
+        assert raw[tracker.annotations[2].char_start:tracker.annotations[2].char_end] == "30 €"
+
+        assert len(tracker.annotations) == 3
+        assert tracker.annotations[0].raw_span == "10 €"
+        assert tracker.annotations[1].raw_span == "20 €"
+        assert tracker.annotations[2].raw_span == "30 €"
+        assert (
+            tracker.current_text
+            == "Pagati dieci euro per pane, venti euro per pasta e trenta euro per frutta."
         )
-        assert ann.char_start == 9
-        assert ann.char_end == 13
-        assert ann.raw_span == "50 €"
-        assert ann.expanded_span == "cinquanta euro"
-        assert tracker.current_text == "Ho speso cinquanta euro per il pranzo."
 
-    def test_multiple_sequential_replacements_offset_mapping(self):
-        """Verify multiple length-changing replacements maintain correct raw_text coordinates."""
-        raw = "Da 10 a 20 persone."
+    def test_wp1_b1_multiple_successive_modifications_to_same_region(self):
+        """Verify WP1-B1: successive modifications to the same region do not double-remap."""
+        raw = "Il totale dovuto è 50 €."
         tracker = OffsetTracker(raw)
 
-        # First replacement: "10" at [3, 5) -> "dieci" (length 2 -> 5, delta = +3)
-        ann1 = tracker.record_replacement(3, 5, "dieci", "cardinal")
-        assert ann1.char_start == 3
-        assert ann1.char_end == 5
-        assert ann1.raw_span == "10"
+        idx = tracker.current_text.index("50 €")
+        # 1st pass: 50 € -> cinquanta euro
+        tracker.record_replacement(idx, idx + 4, "cinquanta euro", "currency")
+        ann1 = tracker.annotations[-1]
+        assert ann1.char_start == 19
+        assert ann1.char_end == 23
+        assert raw[ann1.char_start:ann1.char_end] == "50 €"
 
-        # Intermediate text is now "Da dieci a 20 persone."
-        # In intermediate text, "20" is at index 11 (was at 8 in raw, shifted by +3)
-        idx_20 = tracker.current_text.index("20")
-        assert idx_20 == 11
+        # 2nd pass: refine 'cinquanta euro' -> 'cinquanta euro tondi' in the SAME region
+        idx_refined = tracker.current_text.index("cinquanta euro")
+        tracker.record_replacement(
+            idx_refined, idx_refined + len("cinquanta euro"), "cinquanta euro tondi", "currency"
+        )
+        ann2 = tracker.annotations[-1]
 
-        # Second replacement: "20" at [11, 13) -> "venti"
-        ann2 = tracker.record_replacement(idx_20, idx_20 + 2, "venti", "cardinal")
-        # In original raw_text, "20" was at [8, 10)
-        assert ann2.char_start == 8
-        assert ann2.char_end == 10
-        assert ann2.raw_span == "20"
-        assert ann2.expanded_span == "venti"
+        # Crucial WP1-B1 check: char_start and char_end must remain [19, 23) in original raw_text!
+        assert ann2.char_start == 19
+        assert ann2.char_end == 23
+        assert raw[ann2.char_start:ann2.char_end] == "50 €"
+        assert tracker.current_text == "Il totale dovuto è cinquanta euro tondi."
+
+    def test_wp1_b1_shielded_url_before_numbers(self):
+        """Verify WP1-B1: shielded URL before numbers aligns tracker with shielded text and maps correctly."""
+        raw = "Vedi https://example.org/api:8080 per il prezzo di 50 €."
+        # Step 1: Shield the URL
+        shielded, entities, nonce = EntityShieldManager.shield(raw)
+        tracker = OffsetTracker(raw)
+        tracker.apply_shielding(entities)
+
+        # Verify tracker.current_text is strictly aligned with shielded_text
+        assert tracker.current_text == shielded
+
+        # Step 2: Normalization in intermediate text (WP2-WP5 simulation)
+        idx_50 = tracker.current_text.index("50 €")
+        tracker.record_replacement(idx_50, idx_50 + 4, "cinquanta euro", "currency")
+
+        ann = tracker.annotations[-1]
+        # Verify the mapped coordinates on raw_text point exactly to "50 €"
+        assert ann.raw_span == "50 €"
+        assert raw[ann.char_start:ann.char_end] == "50 €"
+
+        # Step 3: Deshield in tracker
+        for ent in entities:
+            tracker.deshield_entity(ent.placeholder, ent.original_text)
+
+        assert (
+            tracker.current_text
+            == "Vedi https://example.org/api:8080 per il prezzo di cinquanta euro."
+        )
 
 
 class TestWP1SharedCoreNumbers:
-    """Verifies cardinal_to_italian and ordinal_to_italian conforming to Italian orthography."""
+    """Verifies cardinal_to_italian, ordinal_to_italian and secondary observation parameter validation."""
 
     def test_cardinals_under_20(self):
         assert cardinal_to_italian(0) == "zero"
@@ -183,7 +263,6 @@ class TestWP1SharedCoreNumbers:
         assert cardinal_to_italian(19) == "diciannove"
 
     def test_tens_truncation_before_one_and_eight(self):
-        """Verify phonotactic truncation: drop final vowel before uno (1) and otto (8)."""
         assert cardinal_to_italian(21) == "ventuno"
         assert cardinal_to_italian(28) == "ventotto"
         assert cardinal_to_italian(31) == "trentuno"
@@ -194,7 +273,6 @@ class TestWP1SharedCoreNumbers:
         assert cardinal_to_italian(88) == "ottantotto"
 
     def test_compounds_of_three_acute_accent(self):
-        """Verify Treccani rule: compounds ending in 3 require acute accent (ventitré)."""
         assert cardinal_to_italian(3) == "tre"
         assert cardinal_to_italian(23) == "ventitré"
         assert cardinal_to_italian(33) == "trentatré"
@@ -221,9 +299,32 @@ class TestWP1SharedCoreNumbers:
         assert cardinal_to_italian(1_000_000_000) == "un miliardo"
         assert cardinal_to_italian(2_500_000_000) == "due miliardi cinquecento milioni"
 
-    def test_negative_input_raises_value_error(self):
+    def test_boundary_and_edge_case_cardinals(self):
+        """Secondary observation: edge-cases up to upper limit."""
+        assert cardinal_to_italian(100_000) == "centomila"
+        assert cardinal_to_italian(1_000_001) == "un milione uno"
+        assert cardinal_to_italian(1_001_000) == "un milione mille"
+        assert cardinal_to_italian(1_000_000_001) == "un miliardo uno"
+        max_val = 999_999_999_999
+        res = cardinal_to_italian(max_val)
+        assert res.startswith("novecentonovantanove miliardi")
+        assert res.endswith("novecentonovantanovemilanovecentonovantanove")
+
+    def test_parameter_validation_cardinals(self):
+        """Secondary observation: strict argument validation."""
+        # Type errors
+        with pytest.raises(TypeError, match="requires an int"):
+            cardinal_to_italian(3.14)  # type: ignore
+        with pytest.raises(TypeError, match="requires an int"):
+            cardinal_to_italian("100")  # type: ignore
+        with pytest.raises(TypeError, match="requires an int"):
+            cardinal_to_italian(True)  # type: ignore
+
+        # Value errors
         with pytest.raises(ValueError, match="non-negative"):
-            cardinal_to_italian(-5)
+            cardinal_to_italian(-1)
+        with pytest.raises(ValueError, match="upper limit"):
+            cardinal_to_italian(1_000_000_000_000)
 
     def test_ordinals(self):
         assert ordinal_to_italian(1, "m") == "primo"
@@ -233,5 +334,13 @@ class TestWP1SharedCoreNumbers:
         assert ordinal_to_italian(21, "m") == "ventunesimo"
         assert ordinal_to_italian(23, "m") == "ventitreesimo"
 
+    def test_parameter_validation_ordinals(self):
+        """Secondary observation: ordinal validation."""
+        with pytest.raises(TypeError, match="requires an int"):
+            ordinal_to_italian(False)  # type: ignore
         with pytest.raises(ValueError, match="must be >= 1"):
             ordinal_to_italian(0)
+        with pytest.raises(ValueError, match="gender"):
+            ordinal_to_italian(5, gender="x")  # type: ignore
+        with pytest.raises(ValueError, match="upper limit"):
+            ordinal_to_italian(1_000_000_000_000)

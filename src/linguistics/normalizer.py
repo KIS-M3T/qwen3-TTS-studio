@@ -64,19 +64,26 @@ class ItalianTextNormalizer(BaseTextNormalizer):
 
         # Stage 1: Entity Shielding
         if self.config.enable_shielding:
-            shielded_text, shielded_entities = EntityShieldManager.shield(text)
+            shielded_text, shielded_entities, session_nonce = EntityShieldManager.shield(text)
         else:
-            shielded_text, shielded_entities = text, []
+            shielded_text, shielded_entities, session_nonce = text, [], ""
 
+        # Initialize tracker with original raw_text and synchronize with shielded state
         tracker = OffsetTracker(text)
+        if shielded_entities:
+            tracker.apply_shielding(shielded_entities)
 
         # Intermediate Stages 2-7 will execute on shielded_text in WP2-WP5.
-        # In WP1, intermediate_text is shielded_text directly.
-        intermediate_text = shielded_text
+        # In WP1, intermediate_text is tracker.current_text (aligned with shielded_text).
+        intermediate_text = tracker.current_text
 
-        # Stage 8: Entity Deshielding & Validation
+        # Stage 8: Entity Deshielding & Validation (WP1-B2)
         if shielded_entities:
-            final_text = EntityShieldManager.deshield(intermediate_text, shielded_entities)
+            final_text = EntityShieldManager.deshield(
+                intermediate_text, shielded_entities, session_nonce=session_nonce
+            )
+            for entity in shielded_entities:
+                tracker.deshield_entity(entity.placeholder, entity.original_text)
         else:
             final_text = intermediate_text
 

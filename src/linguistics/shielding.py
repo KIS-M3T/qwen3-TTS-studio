@@ -1,11 +1,11 @@
 """Entity Shielding and Deshielding subsystem (Milestone M2, WP1).
 
 Implements Stage 1 (Shielding) and Stage 8 (Deshielding) of the Italian
-linguistic normalization pipeline (R1, R2, S3, P4).
+linguistic normalization pipeline (R1, R2, S3, P4, WP1-B2, WP1-B3).
 
-Isolates structured technical entities (URLs, emails, file paths, UUIDs,
-technical codes) before linguistic processing to prevent corruption of
-numbers, dots, slashes, or hyphens inside them.
+Isolates structured technical entities (URLs with ports/fragments/www,
+emails, file paths, UUIDs, technical codes) before linguistic processing
+to prevent corruption of numbers, dots, slashes, or hyphens inside them.
 """
 
 from dataclasses import dataclass
@@ -24,6 +24,7 @@ class ShieldedEntity:
     category: str  # "url", "email", "path_windows", "path_posix", "uuid", "technical_code"
     char_start: int
     char_end: int
+    session_nonce: str = ""
 
 
 # Category priority for overlap resolution:
@@ -37,14 +38,16 @@ CATEGORY_PRIORITY = {
     "technical_code": 50,
 }
 
-# Compiled regex patterns for entity recognition
+# Compiled regex patterns for entity recognition (WP1-B3)
 PATTERNS = [
-    # URLs (http, https)
+    # URLs: http://, https://, or www. with ports, paths, query params, and fragments
     (
         "url",
         re.compile(
-            r"https?://(?:[a-zA-Z0-9$_.+!*'(),;?&=-]|%[0-9a-fA-F]{2})+"
-            r"(?:/(?:[a-zA-Z0-9$_.+!*'(),;?&=-]|%[0-9a-fA-F]{2})*)*",
+            r"(?:https?://(?:[a-zA-Z0-9_.~!$&'()*+,;=:@/-]|%[0-9a-fA-F]{2})+|"
+            r"www\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,10}(?::\d+)?(?:/(?:[a-zA-Z0-9_.~!$&'()*+,;=:@/-]|%[0-9a-fA-F]{2})*)?)"
+            r"(?:\?(?:[a-zA-Z0-9_.~!$&'()*+,;=:@/?-]|%[0-9a-fA-F]{2})*)?"
+            r"(?:#(?:[a-zA-Z0-9_.~!$&'()*+,;=:@/?-]|%[0-9a-fA-F]{2})*)?",
             re.IGNORECASE,
         ),
     ),
@@ -91,9 +94,6 @@ PATTERNS = [
     ),
 ]
 
-# Pattern matching any shielded placeholder produced by this subsystem
-SHIELD_PLACEHOLDER_REGEX = re.compile(r"§§§SHIELD_[0-9a-fA-F]+_\d+§§§")
-
 
 class EntityShieldManager:
     """Manages collision-free entity shielding and verified deshielding."""
@@ -107,24 +107,26 @@ class EntityShieldManager:
                 return candidate
 
     @classmethod
-    def shield(cls, text: str) -> Tuple[str, List[ShieldedEntity]]:
+    def shield(cls, text: str) -> Tuple[str, List[ShieldedEntity], str]:
         """Identify and replace technical entities with non-colliding private placeholders.
 
         Args:
             text: Raw input text.
 
         Returns:
-            Tuple of (shielded_text, list_of_ShieldedEntity).
+            Tuple of (shielded_text, list_of_ShieldedEntity, session_nonce).
         """
         if not text:
-            return text, []
+            return text, [], ""
 
         candidates = []
         for category, pattern in PATTERNS:
             for match in pattern.finditer(text):
                 start, end = match.span()
-                # Strip trailing punctuation often caught in URLs/paths (.,;:)
                 matched_str = match.group(0)
+
+                # Strip trailing sentence punctuation caught in URLs/paths (.,;:)
+                # but keep URL query/fragment syntax when part of entity
                 while matched_str and matched_str[-1] in ".,;:!?)":
                     end -= 1
                     matched_str = text[start:end]
@@ -133,10 +135,9 @@ class EntityShieldManager:
                     candidates.append((start, end, category, matched_str))
 
         if not candidates:
-            return text, []
+            return text, [], ""
 
         # Resolve overlaps by priority, then longest match
-        # Sort candidates: start ascending, priority descending, length descending
         candidates.sort(
             key=lambda c: (
                 c[0],
@@ -153,9 +154,9 @@ class EntityShieldManager:
                 last_end = end
 
         if not selected:
-            return text, []
+            return text, [], ""
 
-        nonce = cls._generate_nonce(text)
+        session_nonce = cls._generate_nonce(text)
         shielded_entities: List[ShieldedEntity] = []
 
         # Build replacement string from left to right
@@ -164,7 +165,7 @@ class EntityShieldManager:
 
         for i, (start, end, category, matched_str) in enumerate(selected):
             result_parts.append(text[current_idx:start])
-            placeholder = f"§§§SHIELD_{nonce}_{i}§§§"
+            placeholder = f"§§§SHIELD_{session_nonce}_{i}§§§"
             result_parts.append(placeholder)
             shielded_entities.append(
                 ShieldedEntity(
@@ -173,6 +174,7 @@ class EntityShieldManager:
                     category=category,
                     char_start=start,
                     char_end=end,
+                    session_nonce=session_nonce,
                 )
             )
             current_idx = end
@@ -180,40 +182,60 @@ class EntityShieldManager:
         result_parts.append(text[current_idx:])
         shielded_text = "".join(result_parts)
 
-        return shielded_text, shielded_entities
+        return shielded_text, shielded_entities, session_nonce
 
     @classmethod
-    def deshield(cls, text: str, shielded_entities: List[ShieldedEntity]) -> str:
-        """Faithfully restore shielded entities and verify shielding integrity.
+    def deshield(
+        cls,
+        text: str,
+        shielded_entities: List[ShieldedEntity],
+        session_nonce: Optional[str] = None,
+    ) -> str:
+        """Faithfully restore shielded entities and verify shielding integrity (WP1-B2).
+
+        Distinguishes active session placeholders from literal user strings.
 
         Args:
             text: Normalized text containing placeholders.
             shielded_entities: List of ShieldedEntity recorded during Stage 1.
+            session_nonce: Optional session nonce string. Extracted from entities if omitted.
 
         Returns:
             Deshielded text with original technical entities restored.
 
         Raises:
-            EntityShieldingCorruptionError: If placeholders are corrupted, missing, or mismatched.
+            EntityShieldingCorruptionError: If active placeholders are corrupted, missing, or duplicated.
         """
         if not shielded_entities:
             return text
 
+        active_nonce = session_nonce or shielded_entities[0].session_nonce
         result = text
+
         for entity in shielded_entities:
             if entity.placeholder not in result:
                 raise EntityShieldingCorruptionError(
                     f"Integrity check failed: placeholder '{entity.placeholder}' for "
                     f"original entity '{entity.original_text}' was lost or corrupted during normalization."
                 )
+
+            count = result.count(entity.placeholder)
+            if count > 1:
+                raise EntityShieldingCorruptionError(
+                    f"Integrity check failed: placeholder '{entity.placeholder}' was duplicated "
+                    f"({count} occurrences found in text)."
+                )
+
             # Replace exactly once per placeholder
             result = result.replace(entity.placeholder, entity.original_text, 1)
 
-        # Check for any lingering unexpected shield placeholders
-        remaining = SHIELD_PLACEHOLDER_REGEX.findall(result)
-        if remaining:
-            raise EntityShieldingCorruptionError(
-                f"Integrity check failed: unexpected lingering shield placeholders detected: {remaining}"
-            )
+        # Check for any lingering placeholders belonging to THIS active session
+        if active_nonce:
+            session_pattern = re.compile(rf"§§§SHIELD_{re.escape(active_nonce)}_\d+§§§")
+            lingering = session_pattern.findall(result)
+            if lingering:
+                raise EntityShieldingCorruptionError(
+                    f"Integrity check failed: unexpected lingering session placeholders detected: {lingering}"
+                )
 
         return result

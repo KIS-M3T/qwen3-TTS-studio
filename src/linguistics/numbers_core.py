@@ -78,6 +78,8 @@ _ORDINALS_1_TO_10_F = [
     "decima",
 ]
 
+MAX_SUPPORTED_INT = 999_999_999_999
+
 
 def _cardinal_under_100(n: int) -> str:
     """Convert integer 0..99 into Italian cardinal string with phonotactic apocope and accents."""
@@ -137,16 +139,22 @@ def cardinal_to_italian(n: int) -> str:
          1250000 -> "un milione duecentocinquantamila".
 
     Args:
-        n: Non-negative integer.
+        n: Non-negative integer up to 999,999,999,999.
 
     Returns:
         Standard Italian cardinal string.
 
     Raises:
+        TypeError: If n is not an integer (or is a boolean).
         ValueError: If n is negative or exceeds supported limit.
     """
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError(f"cardinal_to_italian requires an int, got {type(n).__name__}")
     if n < 0:
         raise ValueError(f"cardinal_to_italian only accepts non-negative integers, got {n}")
+    if n > MAX_SUPPORTED_INT:
+        raise ValueError(f"cardinal_to_italian upper limit is {MAX_SUPPORTED_INT:,}, got {n}")
+
     if n == 0:
         return "zero"
     if n < 1000:
@@ -174,7 +182,6 @@ def cardinal_to_italian(n: int) -> str:
     thousands = n // 1_000
     n %= 1_000
     if thousands == 1:
-        # 1000 -> "mille", 1001 -> "milleuno"
         thousand_str = "mille"
     elif thousands > 1:
         thousand_str = f"{_cardinal_under_1000(thousands)}mila"
@@ -207,17 +214,24 @@ def ordinal_to_italian(n: int, gender: Literal["m", "f"] = "m") -> str:
     21 -> "ventunesimo" / "ventunesima"
 
     Args:
-        n: Positive integer (>= 1).
+        n: Positive integer (1 <= n <= 999,999,999,999).
         gender: "m" for masculine, "f" for feminine.
 
     Returns:
         Italian ordinal word.
 
     Raises:
-        ValueError: If n < 1.
+        TypeError: If n is not an integer (or is a boolean).
+        ValueError: If n < 1, n exceeds limit, or gender is invalid.
     """
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError(f"ordinal_to_italian requires an int, got {type(n).__name__}")
     if n < 1:
         raise ValueError(f"Ordinal numbers must be >= 1, got {n}")
+    if n > MAX_SUPPORTED_INT:
+        raise ValueError(f"ordinal_to_italian upper limit is {MAX_SUPPORTED_INT:,}, got {n}")
+    if gender not in ("m", "f"):
+        raise ValueError(f"gender must be 'm' or 'f', got {gender!r}")
 
     if n <= 10:
         return _ORDINALS_1_TO_10_M[n] if gender == "m" else _ORDINALS_1_TO_10_F[n]
