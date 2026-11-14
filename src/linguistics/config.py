@@ -30,6 +30,10 @@ class ItalianNormalizerConfig:
     # Stage 1 / Stage 8: Entity shielding protection for URLs, emails, file paths, UUIDs
     enable_shielding: bool = True
 
+    # Stage 2: Temporal expressions (dates, hours, durations) - WP2
+    enable_dates: bool = True
+    enable_times: bool = True
+
     # Stage 7: Phonotactic elision & accent normalization rules
     preserve_apostrophes: bool = True
     normalize_accent_gravis_acutus: bool = True

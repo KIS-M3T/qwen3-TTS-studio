@@ -5,8 +5,10 @@ from typing import Optional
 
 from src.linguistics.base import BaseTextNormalizer
 from src.linguistics.config import ItalianNormalizerConfig
+from src.linguistics.dates import DateNormalizer
 from src.linguistics.exceptions import LinguisticNormalizationError
 from src.linguistics.shielding import EntityShieldManager
+from src.linguistics.times import TimeNormalizer
 from src.linguistics.tracker import OffsetTracker
 from src.linguistics.types import NormalizedText
 
@@ -73,8 +75,16 @@ class ItalianTextNormalizer(BaseTextNormalizer):
         if shielded_entities:
             tracker.apply_shielding(shielded_entities)
 
-        # Intermediate Stages 2-7 will execute on shielded_text in WP2-WP5.
-        # In WP1, intermediate_text is tracker.current_text (aligned with shielded_text).
+        # Stage 2: Temporal Expressions (WP2)
+        # Stage 2A: Dates
+        if self.config.enable_dates:
+            DateNormalizer.normalize_dates(tracker.current_text, tracker)
+
+        # Stage 2B: Times and Durations
+        if self.config.enable_times:
+            TimeNormalizer.normalize_times(tracker.current_text, tracker)
+
+        # Intermediate Stages 3-7 will execute on tracker.current_text in WP3-WP5.
         intermediate_text = tracker.current_text
 
         # Stage 8: Entity Deshielding & Validation (WP1-B2)
@@ -92,7 +102,7 @@ class ItalianTextNormalizer(BaseTextNormalizer):
             normalized_text=final_text,
             annotations=tracker.annotations,
             metadata={
-                "pipeline_stage": "wp1_shielding",
+                "pipeline_stage": "wp2_temporal",
                 "shielded_entities_count": len(shielded_entities),
                 "annotations_count": len(tracker.annotations),
             },
