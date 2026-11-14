@@ -1,4 +1,4 @@
-"""Italian Text Normalizer skeleton and pipeline orchestrator (Milestone M2, WP0)."""
+"""Italian Text Normalizer orchestrating the 8-stage pipeline (Milestone M2, WP1)."""
 
 import logging
 from typing import Optional
@@ -6,6 +6,8 @@ from typing import Optional
 from src.linguistics.base import BaseTextNormalizer
 from src.linguistics.config import ItalianNormalizerConfig
 from src.linguistics.exceptions import LinguisticNormalizationError
+from src.linguistics.shielding import EntityShieldManager
+from src.linguistics.tracker import OffsetTracker
 from src.linguistics.types import NormalizedText
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,11 @@ class ItalianTextNormalizer(BaseTextNormalizer):
     def normalize(self, text: str) -> NormalizedText:
         """Transform raw input text into canonical Italian spoken orthographic form.
 
+        Executes the 8-stage pipeline:
+        Stage 1: Entity Shielding (isolating URLs, emails, paths, UUIDs, technical codes)
+        Stages 2-7: Linguistic Transformations (WP2-WP5 modules)
+        Stage 8: Entity Deshielding & Validation (faithfully restoring shielded tokens)
+
         Args:
             text: Raw input text.
 
@@ -44,7 +51,7 @@ class ItalianTextNormalizer(BaseTextNormalizer):
                 raw_text="",
                 normalized_text="",
                 annotations=[],
-                metadata={"pipeline_stage": "wp0_skeleton", "annotations_count": 0},
+                metadata={"pipeline_stage": "wp1_shielding", "annotations_count": 0},
             )
 
         if text.strip() == "":
@@ -52,14 +59,34 @@ class ItalianTextNormalizer(BaseTextNormalizer):
                 raw_text=text,
                 normalized_text=text,
                 annotations=[],
-                metadata={"pipeline_stage": "wp0_skeleton", "annotations_count": 0},
+                metadata={"pipeline_stage": "wp1_shielding", "annotations_count": 0},
             )
 
-        # WP0 skeleton: pass-through baseline establishing interface contract
-        # Pipeline stages 1-8 will be incrementally integrated across WP1-WP5
+        # Stage 1: Entity Shielding
+        if self.config.enable_shielding:
+            shielded_text, shielded_entities = EntityShieldManager.shield(text)
+        else:
+            shielded_text, shielded_entities = text, []
+
+        tracker = OffsetTracker(text)
+
+        # Intermediate Stages 2-7 will execute on shielded_text in WP2-WP5.
+        # In WP1, intermediate_text is shielded_text directly.
+        intermediate_text = shielded_text
+
+        # Stage 8: Entity Deshielding & Validation
+        if shielded_entities:
+            final_text = EntityShieldManager.deshield(intermediate_text, shielded_entities)
+        else:
+            final_text = intermediate_text
+
         return NormalizedText(
             raw_text=text,
-            normalized_text=text,
-            annotations=[],
-            metadata={"pipeline_stage": "wp0_skeleton", "annotations_count": 0},
+            normalized_text=final_text,
+            annotations=tracker.annotations,
+            metadata={
+                "pipeline_stage": "wp1_shielding",
+                "shielded_entities_count": len(shielded_entities),
+                "annotations_count": len(tracker.annotations),
+            },
         )
