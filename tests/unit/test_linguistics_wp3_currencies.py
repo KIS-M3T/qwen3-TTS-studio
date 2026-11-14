@@ -87,6 +87,9 @@ class TestWP3CurrenciesEuro:
 
         assert normalizer.normalize("Scarto: -0,50 €.").normalized_text == "Scarto: meno cinquanta centesimi."
         assert normalizer.normalize("Importo: -€ 15,00.").normalized_text == "Importo: meno quindici euro."
+        assert normalizer.normalize("Importo: € -15,00.").normalized_text == "Importo: meno quindici euro."
+        assert normalizer.normalize("Tra -10 € e -5 €.").normalized_text == "Tra meno dieci euro e meno cinque euro."
+        assert normalizer.normalize("Voce A - 20 €.").normalized_text == "Voce A - venti euro."
 
     def test_euro_iso_code_eur(self):
         """Corresponds to M2-TC-036: 200 EUR -> duecento euro."""
@@ -130,28 +133,91 @@ class TestWP3SafetyAndEdgeCases:
     """Verifies conservative guards, non-corruption of invalid inputs, shielding, and composability."""
 
     def test_numeric_ranges_are_not_corrupted(self):
-        """Verify hyphenated ranges like '10-20 €' or '€ 10-20' are preserved without mangling."""
+        """WP3-B1: Verify hyphen/dash ranges with or without spaces stay intact without negative distortion."""
         normalizer = ItalianTextNormalizer()
-        for text in ("Prezzo tra 10-20 €.", "Fascia € 10-20.", "Fascia € 10 - 20."):
+        cases = (
+            "Prezzo tra 10-20 €.",
+            "Prezzo tra 10 - 20 €.",
+            "Prezzo tra 10–20 €.",
+            "Prezzo tra 10 – 20 €.",
+            "Prezzo tra 10 — 20 €.",
+            "Prezzo tra 10,50 - 20,00 €.",
+            "Fascia € 10-20.",
+            "Fascia € 10 - 20.",
+            "Fascia € 10–20.",
+            "Fascia € 10 – 20.",
+            "Prezzo 10 - € 20.",
+            "Range 10 - 20 EUR.",
+        )
+        for text in cases:
             res = normalizer.normalize(text)
             assert res.normalized_text == text
             assert res.annotations == []
 
     def test_malformed_or_excess_decimals_are_noop(self):
-        """Verify 3-decimal amounts or dot-decimal amounts are not partially mangled."""
+        """WP3-B2: Verify excess decimals, dot decimals, and double punctuation stay intact."""
         normalizer = ItalianTextNormalizer()
-        for text in ("Valore 12,500 €.", "Importo 12.50 €."):
+        cases = (
+            "Valore 12,500 €.",
+            "Importo 12.50 €.",
+            "Importo € 12,,30.",
+            "Importo 12,,30 €.",
+            "Importo € 12..30.",
+            "Importo 12..30 €.",
+            "Importo € 12.,30.",
+        )
+        for text in cases:
             res = normalizer.normalize(text)
             assert res.normalized_text == text
             assert res.annotations == []
 
-    def test_dual_currency_sandwiches_and_suffix_letters_noop(self):
-        """Verify malformed dual symbols or shorthand like $100k stay intact."""
+    def test_dual_currency_ratios_and_suffix_letters_noop(self):
+        """WP3-B2: Verify dual currencies, slash ratios, and shorthand stay intact."""
         normalizer = ItalianTextNormalizer()
-        for text in ("Errore € 50 €.", "Errore $ 100 USD.", "Valore $100k.", "Costa 50 EURO."):
+        cases = (
+            "Errore € 50 €.",
+            "Errore $ 100 USD.",
+            "Errore 50 € EUR.",
+            "Errore 50 EUR €.",
+            "Errore 50 €/EUR.",
+            "Errore € 50 EUR.",
+            "Rapporto 12 / 50 €.",
+            "Rapporto 12/50 €.",
+            "Rapporto € 12 / 50.",
+            "Rapporto € 12/50.",
+            "Valore $100k.",
+            "Costa 50 EURO.",
+        )
+        for text in cases:
             res = normalizer.normalize(text)
             assert res.normalized_text == text
             assert res.annotations == []
+
+    def test_out_of_domain_huge_numbers_and_5000_digits_safe_noop(self):
+        """WP3-B3: Verify >MAX_SUPPORTED_INT and 5,000-digit numbers do not raise ValueError."""
+        normalizer = ItalianTextNormalizer()
+        huge_5000 = "9" * 5000
+        zeros_5000 = "0" * 5000
+        cases = (
+            f"Importo € {huge_5000}.",
+            f"Importo {huge_5000} €.",
+            f"Importo € {zeros_5000}50.",
+            f"Importo {zeros_5000}50 €.",
+            "Importo 1000000000000 €.",
+            "Importo € 1000000000000.",
+        )
+        for text in cases:
+            res = normalizer.normalize(text)
+            assert res.normalized_text == text
+            assert res.annotations == []
+
+    def test_valid_punctuation_adjacent_to_currency_still_works(self):
+        """Verify fixing character-range lookbehind preserves valid punctuation boundaries."""
+        normalizer = ItalianTextNormalizer()
+        assert normalizer.normalize("Importo:15 €.").normalized_text == "Importo:quindici euro."
+        assert normalizer.normalize("Costa «15 €».").normalized_text == "Costa «quindici euro»."
+        assert normalizer.normalize("Costa € 12...").normalized_text == "Costa dodici euro..."
+        assert normalizer.normalize("Dash — € 20.").normalized_text == "Dash — venti euro."
 
     def test_composite_shielding_unicode_m2_tc_081(self):
         """Corresponds to M2-TC-081: Shielded URL & UUID + Unicode guillemets + 15 €."""

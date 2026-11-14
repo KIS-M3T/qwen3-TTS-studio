@@ -13,10 +13,13 @@ Implements formal monetary register (Ratified Decision D5.A):
 
 import re
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from src.linguistics.numbers_core import MAX_SUPPORTED_INT, cardinal_to_italian
 from src.linguistics.tracker import OffsetTracker
+
+
+_MAX_SUPPORTED_INT_DIGITS = len(str(MAX_SUPPORTED_INT))
 
 
 @dataclass(frozen=True)
@@ -40,28 +43,32 @@ _CURRENCY_SPECS = {
 
 # Prefix form: optional '-', currency symbol/code, optional '-', integer[.thousands][,cents]
 _PREFIX_CURRENCY_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_.,-€$£])"
-    r"(?P<sign1>-\s*)?"
-    r"(?P<curr>€|\$|£|(?:EUR|USD|GBP)\b)"
+    r"(?<![A-Za-z0-9_.,/€$£–—−-])"
+    r"(?P<sign1>-)?"
+    r"(?P<curr>€|\$|£|(?:EUR|USD|GBP)(?![A-Za-z0-9_]))"
     r"\s*"
-    r"(?P<sign2>-\s*)?"
+    r"(?P<sign2>-)?"
     r"(?P<int>\d{1,3}(?:\.\d{3})+|\d+)"
     r"(?:,(?P<cents>\d{1,2}))?"
-    r"(?![.,]\d|/\d|\s*-\s*\d|\s*(?:€|\$|£|(?:EUR|USD|GBP)\b)|[\d%A-Za-z€$£])"
+    r"(?![\d%A-Za-z€$£]|"
+    r"[.,]+(?:\d|,)|\.[.,]*,|"
+    r"\s*[-–—−/]\s*\d|"
+    r"\s*(?:/\s*)?(?:€|\$|£|(?:EUR|USD|GBP)\b))"
 )
 
 # Suffix form: optional '-', integer[.thousands][,cents], currency symbol/code
 _SUFFIX_CURRENCY_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_.,-€$£])"
-    r"(?P<sign>-\s*)?"
+    r"(?<![A-Za-z0-9_.,/€$£–—−-])"
+    r"(?P<sign>-)?"
     r"(?P<int>\d{1,3}(?:\.\d{3})+|\d+)"
     r"(?:,(?P<cents>\d{1,2}))?"
     r"\s*"
     r"(?P<curr>€|\$|£|(?:EUR|USD|GBP)\b)"
-    r"(?![A-Za-z0-9_€$£])"
+    r"(?![A-Za-z0-9_€$£]|\s*(?:/\s*)?(?:€|\$|£|(?:EUR|USD|GBP)\b))"
 )
 
 _PRECEDING_CURRENCY_MARKER = re.compile(r"(?:€|\$|£|\b(?:EUR|USD|GBP))\s*$")
+_PRECEDING_RANGE_OR_RATIO = re.compile(r"\d\s*[-–—−/]\s*$")
 
 _SHIELD_PATTERN = re.compile(r"§§§SHIELD_[a-f0-9]{12}_\d+§§§")
 
@@ -107,6 +114,44 @@ def _format_monetary_amount(
     return f"{prefix}{major_str} e {cents_str}"
 
 
+def _build_replacement(
+    curr_key: str,
+    int_token: str,
+    cents_raw: Optional[str],
+    is_negative: bool,
+) -> Optional[str]:
+    """Validate integer/cent domains safely and format monetary text."""
+    spec = _CURRENCY_SPECS.get(curr_key)
+    if spec is None:
+        return None
+
+    int_str = int_token.replace(".", "")
+    # Guard string length before int() to avoid ValueError on huge (>4300-digit) inputs
+    if len(int_str) > _MAX_SUPPORTED_INT_DIGITS:
+        return None
+
+    int_val = int(int_str)
+    if int_val > MAX_SUPPORTED_INT:
+        return None
+
+    if cents_raw is None:
+        cents_val = 0
+    elif len(cents_raw) == 1:
+        cents_val = int(cents_raw) * 10
+    else:
+        cents_val = int(cents_raw)
+
+    return _format_monetary_amount(int_val, cents_val, is_negative, spec)
+
+
+def _has_blocking_prefix(preceding_text: str) -> bool:
+    """Return True if text before a candidate marks a range, ratio, or dual currency."""
+    return bool(
+        _PRECEDING_CURRENCY_MARKER.search(preceding_text)
+        or _PRECEDING_RANGE_OR_RATIO.search(preceding_text)
+    )
+
+
 class CurrencyNormalizer:
     """Normalizes Italian and major foreign currency expressions (Milestone M2, WP3)."""
 
@@ -140,37 +185,22 @@ class CurrencyNormalizer:
         # 1. Suffix currency forms (e.g. 50 €, 12,50 €, -15,00 €, 200 EUR)
         for m in _SUFFIX_CURRENCY_PATTERN.finditer(text):
             start, end = m.span()
-            if is_shielded(start, end):
-                continue
-            if _PRECEDING_CURRENCY_MARKER.search(text[:start]):
-                continue  # Guard against malformed dual-symbol expressions like '€ 50 €'
-
-            curr_key = m.group("curr")
-            spec = _CURRENCY_SPECS.get(curr_key)
-            if spec is None:
+            if is_shielded(start, end) or _has_blocking_prefix(text[:start]):
                 continue
 
-            int_str = m.group("int").replace(".", "")
-            int_val = int(int_str)
-            if int_val > MAX_SUPPORTED_INT:
-                continue
-
-            cents_raw = m.group("cents")
-            if cents_raw is None:
-                cents_val = 0
-            elif len(cents_raw) == 1:
-                cents_val = int(cents_raw) * 10
-            else:
-                cents_val = int(cents_raw)
-
-            is_negative = bool(m.group("sign"))
-            replacement = _format_monetary_amount(int_val, cents_val, is_negative, spec)
-            candidates.append((start, end, replacement))
+            replacement = _build_replacement(
+                curr_key=m.group("curr"),
+                int_token=m.group("int"),
+                cents_raw=m.group("cents"),
+                is_negative=bool(m.group("sign")),
+            )
+            if replacement is not None:
+                candidates.append((start, end, replacement))
 
         # 2. Prefix currency forms (e.g. € 2.500, $ 100, £ 50, -€ 15,00)
         for m in _PREFIX_CURRENCY_PATTERN.finditer(text):
             start, end = m.span()
-            if is_shielded(start, end):
+            if is_shielded(start, end) or _has_blocking_prefix(text[:start]):
                 continue
 
             # Skip if overlapping with an already matched suffix expression
@@ -182,27 +212,14 @@ class CurrencyNormalizer:
             if sign1 and sign2:
                 continue  # Double sign is malformed
 
-            curr_key = m.group("curr")
-            spec = _CURRENCY_SPECS.get(curr_key)
-            if spec is None:
-                continue
-
-            int_str = m.group("int").replace(".", "")
-            int_val = int(int_str)
-            if int_val > MAX_SUPPORTED_INT:
-                continue
-
-            cents_raw = m.group("cents")
-            if cents_raw is None:
-                cents_val = 0
-            elif len(cents_raw) == 1:
-                cents_val = int(cents_raw) * 10
-            else:
-                cents_val = int(cents_raw)
-
-            is_negative = bool(sign1 or sign2)
-            replacement = _format_monetary_amount(int_val, cents_val, is_negative, spec)
-            candidates.append((start, end, replacement))
+            replacement = _build_replacement(
+                curr_key=m.group("curr"),
+                int_token=m.group("int"),
+                cents_raw=m.group("cents"),
+                is_negative=bool(sign1 or sign2),
+            )
+            if replacement is not None:
+                candidates.append((start, end, replacement))
 
         if not candidates:
             return text
