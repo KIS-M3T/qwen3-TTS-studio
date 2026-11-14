@@ -250,6 +250,75 @@ class TestWP1OffsetTracker:
             == "Vedi https://example.org/api:8080 per il prezzo di cinquanta euro."
         )
 
+    def test_wp1_b1a_exact_shielding_alignment_selective_occurrence(self):
+        """Verify WP1-B1a: exact shielding alignment without find() on ambiguous substrings.
+
+        Test string: 'Codice 123ISO-9001, certificazione ISO-9001.'
+        Verifies that exclusively the second occurrence is shielded, tracker.current_text
+        matches shielded_text identically, and deshielding restores original text.
+        """
+        text = "Codice 123ISO-9001, certificazione ISO-9001."
+        shielded_text, entities, nonce = EntityShieldManager.shield(text)
+
+        # Only the second occurrence (isolated code with word boundary) must be shielded
+        assert len(entities) == 1
+        assert entities[0].original_text == "ISO-9001"
+        assert entities[0].char_start == 35
+        assert entities[0].char_end == 43
+        assert text[entities[0].char_start:entities[0].char_end] == "ISO-9001"
+
+        tracker = OffsetTracker(text)
+        tracker.apply_shielding(entities)
+
+        # WP1-B1a: tracker.current_text must coincide EXACTLY with shielded_text
+        assert tracker.current_text == shielded_text
+        # First occurrence (123ISO-9001) must NOT be shielded in tracker
+        assert "123ISO-9001" in tracker.current_text
+        assert f"123{entities[0].placeholder}" not in tracker.current_text
+
+        # Stage 8: Deshielding in tracker
+        tracker.deshield_entity(entities[0].placeholder, entities[0].original_text)
+        assert tracker.current_text == text
+
+        # Verify end-to-end through normalizer pipeline
+        normalizer = ItalianTextNormalizer()
+        res = normalizer.normalize(text)
+        assert res.normalized_text == text
+        assert res.raw_text == text
+
+    def test_wp1_b1b_partial_modification_of_expanded_content_provenance(self):
+        """Verify WP1-B1b: explicit provenance rule for partial modifications of expanded content.
+
+        Expanded content represents an indivisible semantic unit originating from [raw_start, raw_end).
+        Partial sub-modifications must NOT expose arbitrary linearly interpolated raw coordinates.
+        They must inherit the enclosing raw source span without fractional character slicing.
+        """
+        raw = "Il prezzo è 15 € per articolo."
+        tracker = OffsetTracker(raw)
+
+        # 1st pass: 15 € (chars 12..16) -> "quindici euro"
+        tracker.record_replacement(12, 16, "quindici euro", "currency")
+        ann1 = tracker.annotations[-1]
+        assert ann1.char_start == 12
+        assert ann1.char_end == 16
+        assert ann1.raw_span == "15 €"
+        assert raw[ann1.char_start:ann1.char_end] == "15 €"
+
+        # 2nd pass: partial modification within the expanded region!
+        # Modify only the sub-segment 'euro' inside 'quindici euro' -> 'euro netti'
+        idx_euro = tracker.current_text.index("euro")
+        tracker.record_replacement(idx_euro, idx_euro + 4, "euro netti", "currency")
+        ann2 = tracker.annotations[-1]
+
+        # Explicit WP1-B1b provenance rule verification:
+        # Rather than inventing an arbitrary fractional raw offset (e.g. 14..16 or slicing '5 €'),
+        # the sub-modification inherits the full valid enclosing provenance [12, 16) = "15 €".
+        assert ann2.char_start == 12
+        assert ann2.char_end == 16
+        assert ann2.raw_span == "15 €"
+        assert raw[ann2.char_start:ann2.char_end] == "15 €"
+        assert tracker.current_text == "Il prezzo è quindici euro netti per articolo."
+
 
 class TestWP1SharedCoreNumbers:
     """Verifies cardinal_to_italian, ordinal_to_italian and secondary observation parameter validation."""

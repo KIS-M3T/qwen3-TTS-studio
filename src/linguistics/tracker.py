@@ -18,10 +18,18 @@ from src.linguistics.types import TNAnnotation
 
 @dataclass
 class _Chunk:
-    """Represents a continuous segment of text mapped to an original raw_text interval."""
+    """Represents a continuous segment of text mapped to an original raw_text interval.
+
+    Attributes:
+        text: String content of this chunk in the current intermediate representation.
+        raw_start: Start index (inclusive) of the originating span in raw_text.
+        raw_end: End index (exclusive) of the originating span in raw_text.
+        is_expanded: True if chunk was produced by a normalization expansion/shielding.
+    """
     text: str
     raw_start: int
     raw_end: int
+    is_expanded: bool = False
 
 
 class OffsetTracker:
@@ -35,7 +43,7 @@ class OffsetTracker:
         """
         self.raw_text = raw_text
         self._chunks: List[_Chunk] = (
-            [_Chunk(text=raw_text, raw_start=0, raw_end=len(raw_text))]
+            [_Chunk(text=raw_text, raw_start=0, raw_end=len(raw_text), is_expanded=False)]
             if raw_text
             else []
         )
@@ -47,7 +55,16 @@ class OffsetTracker:
         return "".join(c.text for c in self._chunks)
 
     def _split_at(self, pos: int) -> None:
-        """Split chunks at the specified intermediate character index."""
+        """Split chunks at the specified intermediate character index.
+
+        Explicit provenance rule (WP1-B1b):
+        - For unexpanded chunks (is_expanded=False), characters correspond 1:1 to raw_text.
+          Splitting computes exact raw_mid = c.raw_start + offset without interpolation.
+        - For expanded chunks (is_expanded=True), the synthesized text represents an indivisible
+          semantic unit originating from [c.raw_start, c.raw_end). Partial sub-segments or
+          mutations inside an expanded region inherit the full source provenance [c.raw_start, c.raw_end)
+          without artificial or fractional mathematical interpolation.
+        """
         if pos <= 0 or not self._chunks:
             return
 
@@ -57,14 +74,15 @@ class OffsetTracker:
             c_len = len(c.text)
             if curr < pos < curr + c_len:
                 offset = pos - curr
-                raw_span = c.raw_end - c.raw_start
-                if c_len == raw_span:
+                if not c.is_expanded:
                     raw_mid = c.raw_start + offset
+                    left = _Chunk(c.text[:offset], c.raw_start, raw_mid, is_expanded=False)
+                    right = _Chunk(c.text[offset:], raw_mid, c.raw_end, is_expanded=False)
                 else:
-                    raw_mid = c.raw_start + int(round(offset * raw_span / c_len))
-
-                left = _Chunk(c.text[:offset], c.raw_start, raw_mid)
-                right = _Chunk(c.text[offset:], raw_mid, c.raw_end)
+                    # WP1-B1b: Explicit rule for sub-segments of expanded content.
+                    # Inherit enclosing source span provenance without arbitrary linear interpolation.
+                    left = _Chunk(c.text[:offset], c.raw_start, c.raw_end, is_expanded=True)
+                    right = _Chunk(c.text[offset:], c.raw_start, c.raw_end, is_expanded=True)
                 new_chunks.extend([left, right])
             else:
                 new_chunks.append(c)
@@ -161,8 +179,13 @@ class OffsetTracker:
         raw_start = middle[0].raw_start
         raw_end = middle[-1].raw_end
 
-        # Replace middle chunks with a single chunk covering the same raw_text interval
-        new_chunk = _Chunk(text=replacement, raw_start=raw_start, raw_end=raw_end)
+        # Replace middle chunks with a single chunk covering the bounding raw_text interval
+        new_chunk = _Chunk(
+            text=replacement,
+            raw_start=raw_start,
+            raw_end=raw_end,
+            is_expanded=True,
+        )
         self._chunks = self._chunks[:idx_start] + [new_chunk] + self._chunks[idx_end:]
 
         if not track_annotation:
@@ -182,21 +205,50 @@ class OffsetTracker:
     def apply_shielding(self, shielded_entities: List[ShieldedEntity]) -> None:
         """Align the tracker with the Stage 1 shielded text before intermediate modules run.
 
+        Uses exact [char_start, char_end) spans from shielded entities, preserving order
+        and alignment without ambiguous substring search (WP1-B1a).
+
         Args:
             shielded_entities: List of ShieldedEntity from Stage 1.
         """
-        for entity in shielded_entities:
-            # In raw_text, each entity starts at entity.char_start and ends at entity.char_end.
-            # Find its intermediate position in current_text:
-            pos = self.current_text.find(entity.original_text)
-            if pos != -1:
-                self.record_replacement(
-                    intermediate_start=pos,
-                    intermediate_end=pos + len(entity.original_text),
-                    replacement=entity.placeholder,
-                    category="shield",
-                    track_annotation=False,
+        if not shielded_entities:
+            return
+
+        sorted_entities = sorted(shielded_entities, key=lambda e: e.char_start)
+        new_chunks = []
+        curr = 0
+
+        for entity in sorted_entities:
+            if entity.char_start > curr:
+                new_chunks.append(
+                    _Chunk(
+                        text=self.raw_text[curr:entity.char_start],
+                        raw_start=curr,
+                        raw_end=entity.char_start,
+                        is_expanded=False,
+                    )
                 )
+            new_chunks.append(
+                _Chunk(
+                    text=entity.placeholder,
+                    raw_start=entity.char_start,
+                    raw_end=entity.char_end,
+                    is_expanded=True,
+                )
+            )
+            curr = entity.char_end
+
+        if curr < len(self.raw_text):
+            new_chunks.append(
+                _Chunk(
+                    text=self.raw_text[curr:],
+                    raw_start=curr,
+                    raw_end=len(self.raw_text),
+                    is_expanded=False,
+                )
+            )
+
+        self._chunks = new_chunks
 
     def deshield_entity(self, placeholder: str, original_text: str) -> None:
         """Restore a shielded placeholder in the tracker chunks during Stage 8.
@@ -205,6 +257,17 @@ class OffsetTracker:
             placeholder: Private placeholder string to replace.
             original_text: Original entity text to restore.
         """
+        for i, c in enumerate(self._chunks):
+            if c.text == placeholder:
+                self._chunks[i] = _Chunk(
+                    text=original_text,
+                    raw_start=c.raw_start,
+                    raw_end=c.raw_end,
+                    is_expanded=False,
+                )
+                return
+
+        # Fallback if placeholder is part of a larger compound chunk
         pos = self.current_text.find(placeholder)
         if pos != -1:
             self.record_replacement(
