@@ -260,6 +260,62 @@ class TestWP2Times:
         assert res.normalized_text == text
         assert res.annotations == []
 
+    def test_wp2_b1_partial_match_prevention_impossible_seconds(self):
+        """Verify WP2-B1: HH:MM prefix inside invalid HH:MM:SS is NOT partially normalized."""
+        normalizer = ItalianTextNormalizer()
+        cases = [
+            "12:15:60",
+            "Il sensore riporta 12:15:60 alle porte.",
+            "L'appuntamento era alle 12:15:99.",
+            "alle 12:15:99",
+            "L'orologio segnava le 12:15:60.",
+        ]
+        for text in cases:
+            res = normalizer.normalize(text)
+            assert res.normalized_text == text
+            assert res.annotations == []
+
+    def test_wp2_b1_partial_match_prevention_longer_colon_chains(self):
+        """Verify WP2-B1: HH:MM or HH:MM:SS inside longer colon-chains is preserved as No-Op."""
+        normalizer = ItalianTextNormalizer()
+        cases = [
+            "12:15:30:40",
+            "Il timestamp tecnico è 12:15:30:40.",
+            "L'orologio segnava le 12:15:30:40.",
+            "Il cronometro è di 01:15:30:40.",
+            "alle 12:15:30:40",
+        ]
+        for text in cases:
+            res = normalizer.normalize(text)
+            assert res.normalized_text == text
+            assert res.annotations == []
+
+    def test_wp2_b2_context_gating_false_clock_marker_in_window(self):
+        """Verify WP2-B2: unrelated 'alle' in prior clause or non-governing phrase stays No-Op."""
+        normalizer = ItalianTextNormalizer()
+        text1 = "Siamo alle porte, il display mostra 12:15:30."
+        res1 = normalizer.normalize(text1)
+        assert res1.normalized_text == text1
+        assert res1.annotations == []
+
+        text2 = "Siamo alle porte e il display mostra 12:15:30."
+        res2 = normalizer.normalize(text2)
+        assert res2.normalized_text == text2
+        assert res2.annotations == []
+
+    def test_wp2_b2_context_gating_false_duration_marker_across_sentence(self):
+        """Verify WP2-B2: 'cronometro' in prior sentence or non-governing phrase stays No-Op."""
+        normalizer = ItalianTextNormalizer()
+        text1 = "Il cronometro è stato riposto. Il display mostra 01:15:30."
+        res1 = normalizer.normalize(text1)
+        assert res1.normalized_text == text1
+        assert res1.annotations == []
+
+        text2 = "Il cronometro è fermo e il display mostra 01:15:30."
+        res2 = normalizer.normalize(text2)
+        assert res2.normalized_text == text2
+        assert res2.annotations == []
+
     def test_night_time_23_45(self):
         """Corresponds to M2-AB-004: alle 23:45 -> alle ventitré e quarantacinque."""
         text = "Il treno parte alle 23:45 dal binario otto."

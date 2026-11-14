@@ -1,36 +1,54 @@
 """Time and duration normalization for Italian Text Normalization (Milestone M2, WP2).
 
 Handles:
-- 24-hour clock times (HH:MM) with natural phonotactic contractions ('alle 12:00' -> 'a mezzogiorno', 'alle 08:00' -> 'alle otto')
-- Clock times with seconds (HH:MM:SS) in confirmed clock contexts ('dodici, quindici minuti e trenta secondi')
-- Chronometric durations in confirmed timing contexts ('un'ora, quindici minuti e trenta secondi')
-- Conservative No-Op on ambiguous uncontextualized HH:MM:SS (preserves '12:15:30' intact)
-- Conservative No-Op on impossible hours and minutes (preserves '25:70', '12:99' intact)
+- Atomic colon-chain tokenization to reject partial matches inside invalid HH:MM:SS (e.g. 12:15:60,
+  alle 12:15:99) or multi-segment colon chains (e.g. 12:15:30:40) (WP2-B1)
+- 24-hour clock times (HH:MM) with natural phonotactic contractions ('alle 12:00' -> 'a mezzogiorno',
+  'alle 08:00' -> 'alle otto', 'alle 01:00' -> 'all'una')
+- Grammatically anchored context gating within immediate clause boundaries for HH:MM:SS (WP2-B2):
+  * Clock times with seconds in confirmed governing clock contexts ('dodici, quindici minuti e trenta secondi')
+  * Chronometric durations in confirmed governing duration contexts ('un'ora, quindici minuti e trenta secondi')
+  * Conservative No-Op on neutral, cross-clause, or unanchored occurrences ('12:15:30', '01:15:30')
+- Conservative No-Op on impossible hours and minutes ('25:70', '12:99')
 - Non-interference with shielded entities (§§§SHIELD_...)
 """
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from src.linguistics.numbers_core import cardinal_to_italian
 from src.linguistics.tracker import OffsetTracker
 
-# 3-component times: HH:MM:SS (only valid 00..23, 00..59, 00..59)
-_TIME_3_PATTERN = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d):([0-5]\d)\b")
-
-# 2-component times: HH:MM with optional preceding preposition "alle "
-_TIME_2_PATTERN = re.compile(
-    r"\b(?:(alle)\s+)?([01]?\d|2[0-3]):([0-5]\d)\b",
-    re.IGNORECASE,
+# Atomic colon-separated numeric chain: ensures HH:MM is never partially matched inside
+# invalid HH:MM:SS (e.g. 12:15:60) or longer colon chains (e.g. 12:15:30:40) (WP2-B1).
+_COLON_CHAIN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_:])(\d+(?::\d+)+)(?![A-Za-z0-9_:])"
 )
 
+# Extracts only the immediate clause/phrase preceding a temporal token (stopping at punctuation boundaries).
+_IMMEDIATE_CLAUSE_PATTERN = re.compile(r"([^.!?;,\n]*)$")
+
+# Immediate preceding preposition "alle" governing 2-component HH:MM times
+_PRECEDING_ALLE_PATTERN = re.compile(r"\b(alle)\s+$", re.IGNORECASE)
+
+# Grammatically anchored clock context markers ending right before HH:MM:SS (WP2-B2)
 _CLOCK_CONTEXT_PATTERN = re.compile(
-    r"\b(?:orologio(?:\s+\w+)*\s+segnava\s+le|orario\s+(?:di|del)|alle|ore)\b",
+    r"(?:"
+    r"(?:^|\s)(?:alle(?:\s+ore)?|ore|verso\s+le|fino\s+alle|dalle|per\s+le)\s+"
+    r"|\b(?:orologio|orario|ora|sveglia)\b(?:\s+(?:(?:da|di|del(?:l'|la|lo)?|della|sul(?:l'|la|lo)?|al(?:l'|la|lo)?)\s+\w+|esatt[oa]|locale|centrale|intern[oa])){0,2}\s+(?:segna(?:va)?|indica(?:va)?|mostra(?:va)?|batte(?:va)?)\s+(?:le|l')\s+"
+    r"|\b(?:orario|ora)\b(?:\s+(?:di|del(?:l'|la|lo)?|della|esatt[ao]))?\s*(?:è\s+alle|è|:)\s+"
+    r")$",
     re.IGNORECASE,
 )
 
+# Grammatically anchored chronometric duration markers ending right before HH:MM:SS (WP2-B2)
 _DURATION_CONTEXT_PATTERN = re.compile(
-    r"\b(?:tempo(?:\s+\w+)*\s+cronometro\s+è\s+di|cronometro|durata(?:\s+(?:di|del))?|tempo\s+di|corsa\s+in)\b",
+    r"(?:"
+    r"\b(?:tempo|durata|cronometro|intervallo)\b"
+    r"(?:\s+(?:registrat[oa]|misurat[oa]|totale|complessiv[oa]|effettiv[oa]|finale|massim[oa]|minim[oa]|stimat[oa]|previst[oa]|del(?:l'|la|lo)?|della|da[l']?|dal|su[l']?)){0,4}"
+    r"\s*(?:(?:è|era)\s+di|(?:segna(?:va)?|indica(?:va)?|riporta(?:va)?|fermat[oa]\s+a)|di|in|a|su|pari\s+a|:)\s+"
+    r"|\b(?:corsa|gara|maratona|prova|tappa|completat[oa]|percors[oa]|chius[oa]|terminat[oa])\s+in\s+"
+    r")$",
     re.IGNORECASE,
 )
 
@@ -38,7 +56,7 @@ _SHIELD_PATTERN = re.compile(r"§§§SHIELD_[a-f0-9]{12}_\d+§§§")
 
 
 class TimeNormalizer:
-    """Normalizes Italian time expressions and durations with conservative contextual gating."""
+    """Normalizes Italian time expressions and durations with atomic parsing and grammatical gating."""
 
     @classmethod
     def normalize_times(cls, text: str, tracker: OffsetTracker) -> str:
@@ -61,96 +79,102 @@ class TimeNormalizer:
 
         candidates: List[Tuple[int, int, str]] = []
 
-        # 1. First scan for 3-component times (HH:MM:SS)
-        matched_3_spans = set()
-        for m in _TIME_3_PATTERN.finditer(text):
-            start, end = m.span()
+        for m in _COLON_CHAIN_PATTERN.finditer(text):
+            start, end = m.span(1)
             if is_shielded(start, end):
                 continue
 
-            h = int(m.group(1))
-            minute = int(m.group(2))
-            sec = int(m.group(3))
+            parts = m.group(1).split(":")
 
-            pre_ctx = text[max(0, start - 60):start]
-            is_clock = bool(_CLOCK_CONTEXT_PATTERN.search(pre_ctx))
-            is_duration = bool(_DURATION_CONTEXT_PATTERN.search(pre_ctx))
+            # WP2-B1: Only exact 2-part (HH:MM) or 3-part (HH:MM:SS) colon tokens are eligible.
+            # Longer chains (e.g. 12:15:30:40) are strictly preserved as No-Op.
+            if len(parts) not in (2, 3):
+                continue
 
-            if is_clock:
-                h_str = cardinal_to_italian(h)
-                m_str = cardinal_to_italian(minute)
-                s_str = cardinal_to_italian(sec)
-                min_word = "minuto" if minute == 1 else "minuti"
-                sec_word = "secondo" if sec == 1 else "secondi"
-                replacement = f"{h_str}, {m_str} {min_word} e {s_str} {sec_word}"
-                candidates.append((start, end, replacement))
-                matched_3_spans.add((start, end))
-            elif is_duration:
-                parts = []
-                if h == 1:
-                    parts.append("un'ora")
-                elif h > 1:
-                    parts.append(f"{cardinal_to_italian(h)} ore")
+            # Validate digit formatting: hours 1-2 digits, minutes/seconds strictly 2 digits
+            if not (1 <= len(parts[0]) <= 2 and all(len(p) == 2 for p in parts[1:])):
+                continue
 
-                if minute == 1:
-                    parts.append("un minuto")
-                elif minute > 1:
-                    parts.append(f"{cardinal_to_italian(minute)} minuti")
+            h = int(parts[0])
+            minute = int(parts[1])
+            if not (0 <= h <= 23 and 0 <= minute <= 59):
+                continue  # Impossible hour/minute (e.g. 25:70, 12:99) -> No-Op
 
-                if sec == 1:
-                    parts.append("un secondo")
-                elif sec > 1:
-                    parts.append(f"{cardinal_to_italian(sec)} secondi")
+            if len(parts) == 3:
+                sec = int(parts[2])
+                if not (0 <= sec <= 59):
+                    continue  # Impossible seconds (e.g. 12:15:60, 12:15:99) -> No-Op
 
-                if len(parts) == 3:
-                    replacement = f"{parts[0]}, {parts[1]} e {parts[2]}"
-                elif len(parts) == 2:
-                    replacement = f"{parts[0]} e {parts[1]}"
-                elif len(parts) == 1:
-                    replacement = parts[0]
+                # WP2-B2: Restrict context evaluation to the immediate governing clause
+                clause_match = _IMMEDIATE_CLAUSE_PATTERN.search(text[:start])
+                clause = clause_match.group(1) if clause_match else text[:start]
+
+                is_clock = bool(_CLOCK_CONTEXT_PATTERN.search(clause))
+                is_duration = bool(_DURATION_CONTEXT_PATTERN.search(clause))
+
+                if is_clock:
+                    h_str = cardinal_to_italian(h)
+                    m_str = cardinal_to_italian(minute)
+                    s_str = cardinal_to_italian(sec)
+                    min_word = "minuto" if minute == 1 else "minuti"
+                    sec_word = "secondo" if sec == 1 else "secondi"
+                    replacement = f"{h_str}, {m_str} {min_word} e {s_str} {sec_word}"
+                    candidates.append((start, end, replacement))
+                elif is_duration:
+                    dur_parts = []
+                    if h == 1:
+                        dur_parts.append("un'ora")
+                    elif h > 1:
+                        dur_parts.append(f"{cardinal_to_italian(h)} ore")
+
+                    if minute == 1:
+                        dur_parts.append("un minuto")
+                    elif minute > 1:
+                        dur_parts.append(f"{cardinal_to_italian(minute)} minuti")
+
+                    if sec == 1:
+                        dur_parts.append("un secondo")
+                    elif sec > 1:
+                        dur_parts.append(f"{cardinal_to_italian(sec)} secondi")
+
+                    if len(dur_parts) == 3:
+                        replacement = f"{dur_parts[0]}, {dur_parts[1]} e {dur_parts[2]}"
+                    elif len(dur_parts) == 2:
+                        replacement = f"{dur_parts[0]} e {dur_parts[1]}"
+                    elif len(dur_parts) == 1:
+                        replacement = dur_parts[0]
+                    else:
+                        replacement = "zero secondi"
+
+                    candidates.append((start, end, replacement))
                 else:
-                    replacement = "zero secondi"
+                    # Ambiguous or non-governing context -> Conservative No-Op (WP2-B2)
+                    continue
 
-                candidates.append((start, end, replacement))
-                matched_3_spans.add((start, end))
             else:
-                # Ambiguous format in neutral context (P2): Conservative No-Op!
-                # Record span so 2-component matcher doesn't match the HH:MM prefix
-                matched_3_spans.add((start, end))
+                # Valid 2-component time HH:MM
+                alle_match = _PRECEDING_ALLE_PATTERN.search(text[:start])
+                has_alle = bool(alle_match)
+                replace_start = alle_match.start(1) if alle_match else start
 
-        # 2. Second scan for 2-component times (HH:MM)
-        for m in _TIME_2_PATTERN.finditer(text):
-            start, end = m.span()
-            if is_shielded(start, end):
-                continue
+                if h == 12 and minute == 0:
+                    replacement = "a mezzogiorno" if has_alle else "mezzogiorno"
+                elif h == 0 and minute == 0:
+                    replacement = "a mezzanotte" if has_alle else "mezzanotte"
+                elif h == 1 and minute == 0:
+                    replacement = "all'una" if has_alle else "l'una"
+                elif h == 1 and minute > 0:
+                    min_str = cardinal_to_italian(minute)
+                    replacement = f"all'una e {min_str}" if has_alle else f"l'una e {min_str}"
+                elif minute == 0:
+                    h_str = cardinal_to_italian(h)
+                    replacement = f"alle {h_str}" if has_alle else h_str
+                else:
+                    h_str = cardinal_to_italian(h)
+                    m_str = cardinal_to_italian(minute)
+                    replacement = f"alle {h_str} e {m_str}" if has_alle else f"{h_str} e {m_str}"
 
-            # Ensure we do not match inside a 3-component time
-            if any(s3 <= start and end <= e3 for s3, e3 in matched_3_spans):
-                continue
-
-            prep = m.group(1)
-            h = int(m.group(2))
-            minute = int(m.group(3))
-            has_alle = bool(prep)
-
-            if h == 12 and minute == 0:
-                replacement = "a mezzogiorno" if has_alle else "mezzogiorno"
-            elif h == 0 and minute == 0:
-                replacement = "a mezzanotte" if has_alle else "mezzanotte"
-            elif h == 1 and minute == 0:
-                replacement = "all'una" if has_alle else "l'una"
-            elif h == 1 and minute > 0:
-                min_str = cardinal_to_italian(minute)
-                replacement = f"all'una e {min_str}" if has_alle else f"l'una e {min_str}"
-            elif minute == 0:
-                h_str = cardinal_to_italian(h)
-                replacement = f"alle {h_str}" if has_alle else h_str
-            else:
-                h_str = cardinal_to_italian(h)
-                m_str = cardinal_to_italian(minute)
-                replacement = f"alle {h_str} e {m_str}" if has_alle else f"{h_str} e {m_str}"
-
-            candidates.append((start, end, replacement))
+                candidates.append((replace_start, end, replacement))
 
         if not candidates:
             return text
@@ -158,9 +182,9 @@ class TimeNormalizer:
         # Sort descending by start index to replace right-to-left
         candidates.sort(key=lambda c: c[0], reverse=True)
 
-        for start, end, replacement in candidates:
+        for replace_start, end, replacement in candidates:
             tracker.record_replacement(
-                intermediate_start=start,
+                intermediate_start=replace_start,
                 intermediate_end=end,
                 replacement=replacement,
                 category="time",
