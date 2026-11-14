@@ -8,55 +8,18 @@ Implements Stage 4 of the Italian Linguistic Normalization Pipeline (Spec Rev 2.
 """
 
 import re
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from src.linguistics.numbers import (
+    METRIC_UNIT_ALT,
+    METRIC_UNIT_SPECS,
     collect_protected_spans,
     format_decimal_italian,
+    is_leading_zero_integer,
+    is_unit_singular_one,
     overlaps_any,
 )
 from src.linguistics.tracker import OffsetTracker
-
-# Curated metric and physical units mapped to (singular, plural) Italian forms.
-# Keys are matched case-sensitively to distinguish e.g. '5 g' (grams) from '5G' (telecom).
-_UNIT_SPECS: Dict[str, Tuple[str, str]] = {
-    "km/h": ("chilometro orario", "chilometri orari"),
-    "m/s": ("metro al secondo", "metri al secondo"),
-    "km²": ("chilometro quadrato", "chilometri quadrati"),
-    "km2": ("chilometro quadrato", "chilometri quadrati"),
-    "m²": ("metro quadrato", "metri quadrati"),
-    "m2": ("metro quadrato", "metri quadrati"),
-    "cm²": ("centimetro quadrato", "centimetri quadrati"),
-    "cm2": ("centimetro quadrato", "centimetri quadrati"),
-    "mm²": ("millimetro quadrato", "millimetri quadrati"),
-    "mm2": ("millimetro quadrato", "millimetri quadrati"),
-    "m³": ("metro cubo", "metri cubi"),
-    "m3": ("metro cubo", "metri cubi"),
-    "cm³": ("centimetro cubo", "centimetri cubi"),
-    "cm3": ("centimetro cubo", "centimetri cubi"),
-    "km": ("chilometro", "chilometri"),
-    "cm": ("centimetro", "centimetri"),
-    "mm": ("millimetro", "millimetri"),
-    "kg": ("chilogrammo", "chilogrammi"),
-    "mg": ("milligrammo", "milligrammi"),
-    "ml": ("millilitro", "millilitri"),
-    "cl": ("centilitro", "centilitri"),
-    "dl": ("decilitro", "decilitri"),
-    "kWh": ("chilowattora", "chilowattora"),
-    "kW": ("chilowatt", "chilowatt"),
-    "MW": ("megawatt", "megawatt"),
-    "GHz": ("gigahertz", "gigahertz"),
-    "MHz": ("megahertz", "megahertz"),
-    "kHz": ("chilohertz", "chilohertz"),
-    "Hz": ("hertz", "hertz"),
-    "°C": ("grado centigrado", "gradi centigradi"),
-    "m": ("metro", "metri"),
-    "g": ("grammo", "grammi"),
-    "l": ("litro", "litri"),
-    "L": ("litro", "litri"),
-}
-
-_UNIT_ALT = "|".join(re.escape(k) for k in sorted(_UNIT_SPECS.keys(), key=len, reverse=True))
 
 _PERCENTAGE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.,/€$£–—−:-])"
@@ -73,7 +36,7 @@ _UNIT_PATTERN = re.compile(
     r"(?P<int>\d{1,3}(?:\.\d{3})+|\d+)"
     r"(?:,(?P<frac>\d+))?"
     r"\s*"
-    rf"(?P<unit>{_UNIT_ALT})"
+    rf"(?P<unit>{METRIC_UNIT_ALT})"
     r"(?![A-Za-z0-9_/²³°%]|\.[A-Za-z0-9_])"
 )
 
@@ -99,8 +62,12 @@ class UnitsNormalizer:
             if overlaps_any(start, end, protected_spans) or _PRECEDING_RANGE_OR_RATIO.search(text[:start]):
                 continue
 
+            int_token = m.group("int")
+            if is_leading_zero_integer(int_token):
+                continue
+
             num_words = format_decimal_italian(
-                m.group("int"),
+                int_token,
                 m.group("frac"),
                 bool(m.group("sign")),
             )
@@ -116,12 +83,15 @@ class UnitsNormalizer:
                 continue
 
             unit_key = m.group("unit")
-            singular, plural = _UNIT_SPECS[unit_key]
+            singular, plural = METRIC_UNIT_SPECS[unit_key]
             int_token = m.group("int")
+            if is_leading_zero_integer(int_token):
+                continue
+
             frac_token = m.group("frac")
             is_negative = bool(m.group("sign"))
 
-            if frac_token is None and int_token.replace(".", "") == "1":
+            if is_unit_singular_one(int_token, frac_token):
                 prefix = "meno " if is_negative else ""
                 replacement = f"{prefix}un {singular}"
             else:

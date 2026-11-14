@@ -17,6 +17,11 @@ Implements Stage 5 of the Italian Linguistic Normalization Pipeline (Spec Rev 2.
 import re
 from typing import Dict, List, Optional, Tuple
 
+from src.linguistics.dates import (
+    MONTHS_REGEX_STR,
+    MONTH_NAME_TO_NUM,
+    is_valid_gregorian_date,
+)
 from src.linguistics.numbers_core import (
     MAX_SUPPORTED_INT,
     cardinal_to_italian,
@@ -113,6 +118,57 @@ _PROTECTED_DOT_PATTERN = re.compile(r"\b\d+(?:\.\d{1,2}|\.\d{4,})(?:\.\d+)*\b")
 _PROTECTED_MALFORMED_PATTERN = re.compile(r"\b\d+(?:[.,]{2,}\d+)+\b|\b\d+,\d+(?:,\d+)+\b")
 _CURRENCY_SYMBOLS_OR_CODES = ("€", "$", "£", "EUR", "USD", "GBP")
 
+# Curated metric and physical units mapped to (singular, plural) Italian forms.
+# Shared with Stage 4 (units.py) as single source of truth so Stage 5 protects
+# conservative No-Op leading-zero unit quantities (e.g. '00001 kg') from CAP/cardinal rules.
+# Keys are matched case-sensitively to distinguish e.g. '5 g' (grams) from '5G' (telecom).
+METRIC_UNIT_SPECS: Dict[str, Tuple[str, str]] = {
+    "km/h": ("chilometro orario", "chilometri orari"),
+    "m/s": ("metro al secondo", "metri al secondo"),
+    "km²": ("chilometro quadrato", "chilometri quadrati"),
+    "km2": ("chilometro quadrato", "chilometri quadrati"),
+    "m²": ("metro quadrato", "metri quadrati"),
+    "m2": ("metro quadrato", "metri quadrati"),
+    "cm²": ("centimetro quadrato", "centimetri quadrati"),
+    "cm2": ("centimetro quadrato", "centimetri quadrati"),
+    "mm²": ("millimetro quadrato", "millimetri quadrati"),
+    "mm2": ("millimetro quadrato", "millimetri quadrati"),
+    "m³": ("metro cubo", "metri cubi"),
+    "m3": ("metro cubo", "metri cubi"),
+    "cm³": ("centimetro cubo", "centimetri cubi"),
+    "cm3": ("centimetro cubo", "centimetri cubi"),
+    "km": ("chilometro", "chilometri"),
+    "cm": ("centimetro", "centimetri"),
+    "mm": ("millimetro", "millimetri"),
+    "kg": ("chilogrammo", "chilogrammi"),
+    "mg": ("milligrammo", "milligrammi"),
+    "ml": ("millilitro", "millilitri"),
+    "cl": ("centilitro", "centilitri"),
+    "dl": ("decilitro", "decilitri"),
+    "kWh": ("chilowattora", "chilowattora"),
+    "kW": ("chilowatt", "chilowatt"),
+    "MW": ("megawatt", "megawatt"),
+    "GHz": ("gigahertz", "gigahertz"),
+    "MHz": ("megahertz", "megahertz"),
+    "kHz": ("chilohertz", "chilohertz"),
+    "Hz": ("hertz", "hertz"),
+    "°C": ("grado centigrado", "gradi centigradi"),
+    "m": ("metro", "metri"),
+    "g": ("grammo", "grammi"),
+    "l": ("litro", "litri"),
+    "L": ("litro", "litri"),
+}
+
+METRIC_UNIT_ALT = "|".join(re.escape(k) for k in sorted(METRIC_UNIT_SPECS.keys(), key=len, reverse=True))
+
+_PROTECTED_ALPHA_DATE_PATTERN = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<day>\d{{1,2}})\s*(?:°|\^|o|º)?\s+(?P<month>{MONTHS_REGEX_STR})(?:\s+(?P<year>\d{{1,4}}))?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_PROTECTED_LEADING_ZERO_UNIT_PATTERN = re.compile(
+    rf"(?<![A-Za-z0-9_.,/€$£–—−:-])-?\b0\d+(?:,\d+)?\s*(?:%|{METRIC_UNIT_ALT})(?![A-Za-z0-9_/²³°%]|\.[A-Za-z0-9_])"
+)
+
 # Certified telephone patterns (Policy D2.A)
 _INTL_PHONE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_+=:])(?P<plus>\+)(?:39|1|33|44|49|41|34|[1-9]\d{0,2})(?:[\s.-]?\d{2,5}){1,5}\b(?![.,]\d)"
@@ -179,7 +235,32 @@ def collect_protected_spans(text: str) -> List[Tuple[int, int]]:
         spans.extend(m.span() for m in _PROTECTED_DOT_PATTERN.finditer(text))
     if "." in text or "," in text:
         spans.extend(m.span() for m in _PROTECTED_MALFORMED_PATTERN.finditer(text))
+    if "0" in text:
+        spans.extend(m.span() for m in _PROTECTED_LEADING_ZERO_UNIT_PATTERN.finditer(text))
+    text_lower = text.lower()
+    if any(month in text_lower for month in MONTH_NAME_TO_NUM) and any(ch.isdigit() for ch in text):
+        for m in _PROTECTED_ALPHA_DATE_PATTERN.finditer(text):
+            day = int(m.group("day"))
+            month = MONTH_NAME_TO_NUM[m.group("month").lower()]
+            year_str = m.group("year")
+            year = int(year_str) if year_str is not None else None
+            if not is_valid_gregorian_date(day, month, year):
+                spans.append(m.span())
     return spans
+
+
+def is_leading_zero_integer(int_token: str) -> bool:
+    """Return True if an integer token has redundant leading zero padding (e.g. '01', '0001')."""
+    raw_digits = int_token.replace(".", "")
+    return len(raw_digits) > 1 and raw_digits.startswith("0")
+
+
+def is_unit_singular_one(int_token: str, frac_token: Optional[str]) -> bool:
+    """Return True iff the numeric expression is unambiguously the exact integer 1."""
+    if frac_token is not None or is_leading_zero_integer(int_token):
+        return False
+    raw_digits = int_token.replace(".", "")
+    return len(raw_digits) <= _MAX_SUPPORTED_INT_DIGITS and int(raw_digits) == 1
 
 
 def overlaps_any(start: int, end: int, spans: List[Tuple[int, int]]) -> bool:
@@ -399,7 +480,7 @@ class NumberNormalizer:
             frac_token = m.group("frac")
 
             # Prevent reading leading-zero non-CAP multi-digit integers like '007' as bare cardinal '7'
-            if frac_token is None and len(int_token) > 1 and int_token.startswith("0") and "." not in int_token:
+            if frac_token is None and is_leading_zero_integer(int_token):
                 continue
 
             if frac_token is None and not sign and int_token == "1":

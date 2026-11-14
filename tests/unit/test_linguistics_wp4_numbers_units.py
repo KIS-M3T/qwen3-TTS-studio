@@ -261,3 +261,43 @@ class TestWP4SafetyCompositeLatencyAndIdempotence:
         times.sort()
         p95 = times[int(len(times) * 0.95)]
         assert p95 < 3.0, f"WP4 p95 latency {p95:.3f} ms exceeds 3.0 ms gate"
+
+    def test_wp4_b1_impossible_alphanumeric_dates_preserved_through_stage5(self):
+        """WP4-B1: Impossible alphanumeric Gregorian dates stay complete No-Op in Stages 2-5."""
+        normalizer = ItalianTextNormalizer()
+
+        for impossible in ("31 febbraio 2026", "29 febbraio 2025", "La scadenza del 31 aprile 2026 è nulla."):
+            res = normalizer.normalize(impossible)
+            assert res.normalized_text == impossible
+            assert res.annotations == []
+
+        leap = normalizer.normalize("29 febbraio 2024")
+        assert leap.normalized_text == "ventinove febbraio duemilaventiquattro"
+        assert len(leap.annotations) == 1
+        assert leap.annotations[0].category == "date"
+
+        composite_text = "Il 31 febbraio 2026 arrivano 42 pacchi da 2 kg."
+        comp = normalizer.normalize(composite_text)
+        assert comp.normalized_text == "Il 31 febbraio 2026 arrivano quarantadue pacchi da due chilogrammi."
+        for ann in comp.annotations:
+            assert composite_text[ann.char_start:ann.char_end] == ann.raw_span
+
+    def test_wp4_b2_leading_zero_units_conservative_noop_and_contracts_preserved(self):
+        """WP4-B2: Ambiguous leading-zero quantities stay conservative No-Op; valid contracts stay intact."""
+        normalizer = ItalianTextNormalizer()
+
+        for raw in ("01 kg", "0001 kg", "00001 kg", "05 km", "01%", "01,5 kg"):
+            res = normalizer.normalize(raw)
+            assert res.normalized_text == raw
+            assert res.annotations == []
+
+        assert normalizer.normalize("1 kg").normalized_text == "un chilogrammo"
+        assert normalizer.normalize("0 kg").normalized_text == "zero chilogrammi"
+        assert normalizer.normalize("0,5 kg").normalized_text == "zero virgola cinque chilogrammi"
+        assert normalizer.normalize("00187 Roma").normalized_text == "zero zero uno otto sette Roma"
+        assert normalizer.normalize("+39 347 1234567").normalized_text == "più tre nove tre quattro sette uno due tre quattro cinque sei sette"
+        assert (
+            normalizer.normalize("Telefono: 06 12345678").normalized_text
+            == "Telefono: zero sei uno due tre quattro cinque sei sette otto"
+        )
+        assert normalizer.normalize("1 mela").normalized_text == "una mela"
