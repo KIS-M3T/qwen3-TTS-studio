@@ -101,4 +101,5 @@ _wheels/
 
 
 bench/outputs/
+.m2_blind_secrets/
 

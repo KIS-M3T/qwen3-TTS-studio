@@ -19,6 +19,8 @@ from tests.ab_linguistics.test_ab_harness import (
     ABTestingHarness,
     DEFAULT_AB_CORPUS_PATH,
     DEFAULT_AB_OUTPUT_DIR,
+    DEFAULT_COORDINATOR_KEY_PATH,
+    DEFAULT_EVALUATOR_PACK_DIR,
     build_default_ab_decoding_params,
     compute_model_weights_sha256,
     load_ab_corpus,
@@ -110,6 +112,18 @@ def run_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_prepare_blind_pack(args: argparse.Namespace) -> int:
+    """Create a freshly randomized, stripped evaluator pack and isolated coordinator key."""
+    info = ABTestingHarness.create_blind_evaluator_package(
+        source_dir=Path(args.source_dir),
+        pack_dir=Path(args.pack_dir),
+        key_output_path=Path(args.key_out),
+        num_evaluators=args.evaluators,
+    )
+    print(json.dumps(info, indent=2, ensure_ascii=False))
+    return 0
+
+
 def run_score(args: argparse.Namespace) -> int:
     """Compute MOS, Delta-MOS, Standard Win Rate, and Non-Loss Rate from evaluator CSV."""
     csv_path = Path(args.csv)
@@ -130,9 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
     gen_p.add_argument("--output-dir", default=str(DEFAULT_AB_OUTPUT_DIR))
     gen_p.add_argument("--ref-audio", default=str(REPO_ROOT / "bench" / "reference_voices" / "ref_voice_it_01.wav"))
 
+    pack_p = sub.add_parser("prepare-blind-pack", help="Build clean anonymous evaluator pack")
+    pack_p.add_argument("--source-dir", default=str(DEFAULT_AB_OUTPUT_DIR))
+    pack_p.add_argument("--pack-dir", default=str(DEFAULT_EVALUATOR_PACK_DIR))
+    pack_p.add_argument("--key-out", default=str(DEFAULT_COORDINATOR_KEY_PATH))
+    pack_p.add_argument("--evaluators", type=int, default=3)
+
     score_p = sub.add_parser("score", help="Score blinded evaluator CSV ratings")
     score_p.add_argument("--csv", required=True)
-    score_p.add_argument("--mapping", default=str(DEFAULT_AB_OUTPUT_DIR / "blinded_mapping_secret.json"))
+    score_p.add_argument("--mapping", default=str(DEFAULT_COORDINATOR_KEY_PATH))
     return parser
 
 
@@ -141,6 +161,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "generate":
         return run_generate(args)
+    if args.command == "prepare-blind-pack":
+        return run_prepare_blind_pack(args)
     if args.command == "score":
         return run_score(args)
     return 1

@@ -115,57 +115,135 @@ def load_ab_corpus(corpus_path: Path = DEFAULT_AB_CORPUS_PATH) -> List[Dict[str,
     return records
 
 
+import re
+
+EXPECTED_ACTIVE_AB_IDS: Tuple[str, ...] = tuple(f"M2-AB-{i:03d}" for i in range(1, 21))
+EXPECTED_CONTROL_AB_IDS: Tuple[str, ...] = ("M2-AB-017-CTRL",)
+MIN_INDEPENDENT_EVALUATORS: int = 3
+DEFAULT_EVALUATOR_PACK_DIR = REPO_ROOT / "bench" / "ab_evaluator_pack_m2"
+DEFAULT_COORDINATOR_KEY_PATH = REPO_ROOT / ".m2_blind_secrets" / "wp6_eval_key.json"
+_INT_SCORE_RE = re.compile(r"^[+-]?\d+$")
+
+
 def _parse_rating(value: Any) -> Optional[int]:
-    """Parse optional integer MOS score in [1, 5]; blank/None returns None."""
+    """Parse optional STRICT integer MOS score in [1, 5]; blank/None returns None."""
     if value is None:
         return None
-    text = str(value).strip()
-    if not text:
-        return None
-    score = int(float(text))
+    if isinstance(value, bool):
+        raise ValueError(f"Boolean value is not a valid integer MOS score: {value!r}")
+    if isinstance(value, int):
+        score = value
+    elif isinstance(value, float):
+        raise ValueError(f"MOS rating must be an integer in [1, 5], got float {value!r}")
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if not _INT_SCORE_RE.match(text):
+            raise ValueError(f"MOS rating must be an integer in [1, 5], got {value!r}")
+        score = int(text)
     if not 1 <= score <= 5:
         raise ValueError(f"MOS rating must be within [1, 5], got {score}")
     return score
 
 
+def _extract_pair_ratings(
+    row: Dict[str, Any],
+    mapping_by_pair: Optional[Dict[str, Dict[str, Any]]],
+) -> Tuple[str, str, bool, Optional[int], Optional[int]]:
+    """Resolve pair metadata and strictly extract (score_a, score_b) from raw or blinded columns."""
+    item_id = str(row.get("item_id", "")).strip()
+    test_id = str(row.get("test_id", "")).strip()
+    pair_label = str(row.get("pair_label", "")).strip()
+    raw_ctrl = str(row.get("is_control", "")).strip().lower()
+    is_control = raw_ctrl in {"1", "true", "yes"} or test_id.endswith("-CTRL")
+
+    map_entry = None
+    if mapping_by_pair is not None:
+        map_entry = (
+            mapping_by_pair.get(item_id)
+            or mapping_by_pair.get(pair_label)
+            or mapping_by_pair.get(test_id)
+        )
+        if map_entry is not None:
+            test_id = test_id or str(map_entry.get("test_id", "")).strip()
+            pair_label = pair_label or str(map_entry.get("pair_label", item_id)).strip()
+            if "is_control" in map_entry:
+                is_control = bool(map_entry["is_control"]) or test_id.endswith("-CTRL")
+
+    canonical_id = test_id or pair_label or item_id
+    score_a = _parse_rating(row.get("score_a"))
+    score_b = _parse_rating(row.get("score_b"))
+
+    has_s1 = "stim_1_score" in row or "stimulus_1_score" in row
+    has_s2 = "stim_2_score" in row or "stimulus_2_score" in row
+    if (score_a is None or score_b is None) and (has_s1 or has_s2):
+        raw_s1 = row["stim_1_score"] if "stim_1_score" in row else row.get("stimulus_1_score")
+        raw_s2 = row["stim_2_score"] if "stim_2_score" in row else row.get("stimulus_2_score")
+        s1 = _parse_rating(raw_s1)
+        s2 = _parse_rating(raw_s2)
+        if (s1 is None) != (s2 is None):
+            raise ValueError(
+                f"Half-completed blinded row for {canonical_id}: both stimuli must be scored"
+            )
+        if s1 is not None and s2 is not None:
+            if map_entry is None:
+                raise ValueError(
+                    f"Cannot unblind scores for {canonical_id}: missing mapping entry"
+                )
+            if map_entry["stimulus_1"] == "A":
+                score_a, score_b = s1, s2
+            else:
+                score_a, score_b = s2, s1
+    elif (score_a is None) != (score_b is None):
+        raise ValueError(
+            f"Half-completed direct row for {canonical_id}: both score_a and score_b must be provided"
+        )
+
+    return canonical_id, pair_label or item_id, is_control, score_a, score_b
+
+
 def score_blinded_evaluations(
     rows: Sequence[Dict[str, Any]],
     mapping_by_pair: Optional[Dict[str, Dict[str, Any]]] = None,
+    expected_active_ids: Optional[Sequence[str]] = EXPECTED_ACTIVE_AB_IDS,
+    expected_control_ids: Optional[Sequence[str]] = EXPECTED_CONTROL_AB_IDS,
+    min_evaluators: int = MIN_INDEPENDENT_EVALUATORS,
 ) -> Dict[str, Any]:
-    """Aggregate human A/B ratings using exact M2 Acceptance Matrix § 3.3 formulas.
+    """Validate and aggregate human A/B ratings using M2 Acceptance Matrix § 3.3–3.4.
 
-    Supports either direct ``score_a``/``score_b`` columns or blinded
-    ``stimulus_1_score``/``stimulus_2_score`` joined against ``mapping_by_pair``.
-    Control rows (``is_control`` true or test_id ending in ``-CTRL``) are excluded
-    from the active denominator and summarized separately.
+    Enforces strict integer MOS in [1, 5], duplicate/contradictory rejection per
+    (pair, evaluator_id), separate control reporting, and full 20-pair x >=3 evaluator
+    completeness before any evaluation can report ``PASSED``.
     """
     active_ratings: List[Dict[str, Any]] = []
     control_ratings: List[Dict[str, Any]] = []
+    seen_pair_evaluator: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    active_evaluators_by_pair: Dict[str, set] = {}
+    control_evaluators_by_pair: Dict[str, set] = {}
 
     for row in rows:
-        test_id = str(row.get("test_id", "")).strip()
-        pair_label = str(row.get("pair_label", "")).strip()
-        evaluator_id = str(row.get("evaluator_id", "")).strip() or "unknown"
-        raw_ctrl = str(row.get("is_control", "")).strip().lower()
-        is_control = raw_ctrl in {"1", "true", "yes"} or test_id.endswith("-CTRL")
-
-        score_a = _parse_rating(row.get("score_a"))
-        score_b = _parse_rating(row.get("score_b"))
-        if (score_a is None or score_b is None) and mapping_by_pair is not None:
-            s1 = _parse_rating(row.get("stimulus_1_score"))
-            s2 = _parse_rating(row.get("stimulus_2_score"))
-            map_entry = mapping_by_pair.get(pair_label) or mapping_by_pair.get(test_id)
-            if s1 is not None and s2 is not None and map_entry is not None:
-                if map_entry["stimulus_1"] == "A":
-                    score_a, score_b = s1, s2
-                else:
-                    score_a, score_b = s2, s1
-
+        evaluator_id = str(row.get("evaluator_id", "")).strip()
+        canonical_id, pair_label, is_control, score_a, score_b = _extract_pair_ratings(
+            row, mapping_by_pair
+        )
         if score_a is None or score_b is None:
             continue
 
+        if not canonical_id:
+            raise ValueError("Scored row is missing pair/test identifier")
+        if not evaluator_id or evaluator_id.lower() == "unknown":
+            raise ValueError(f"Scored row for {canonical_id} is missing valid evaluator_id")
+
+        dup_key = (canonical_id, evaluator_id)
+        if dup_key in seen_pair_evaluator:
+            raise ValueError(
+                f"Duplicate or contradictory evaluation for {canonical_id} by evaluator {evaluator_id}"
+            )
+        seen_pair_evaluator[dup_key] = (score_a, score_b)
+
         entry = {
-            "test_id": test_id,
+            "test_id": canonical_id,
             "pair_label": pair_label,
             "evaluator_id": evaluator_id,
             "score_a": score_a,
@@ -173,14 +251,81 @@ def score_blinded_evaluations(
         }
         if is_control:
             control_ratings.append(entry)
+            control_evaluators_by_pair.setdefault(canonical_id, set()).add(evaluator_id)
         else:
             active_ratings.append(entry)
+            active_evaluators_by_pair.setdefault(canonical_id, set()).add(evaluator_id)
 
-    if not active_ratings:
+    expected_active = list(expected_active_ids or [])
+    expected_control = list(expected_control_ids or [])
+    missing_active_pairs = [
+        pid for pid in expected_active if len(active_evaluators_by_pair.get(pid, set())) == 0
+    ]
+    under_evaluated_active_pairs = {
+        pid: len(active_evaluators_by_pair.get(pid, set()))
+        for pid in expected_active
+        if 0 < len(active_evaluators_by_pair.get(pid, set())) < min_evaluators
+    }
+    missing_control_pairs = [
+        pid for pid in expected_control if len(control_evaluators_by_pair.get(pid, set())) == 0
+    ]
+    under_evaluated_control_pairs = {
+        pid: len(control_evaluators_by_pair.get(pid, set()))
+        for pid in expected_control
+        if 0 < len(control_evaluators_by_pair.get(pid, set())) < min_evaluators
+    }
+    unexpected_active_pairs = (
+        sorted(set(active_evaluators_by_pair.keys()) - set(expected_active))
+        if expected_active
+        else []
+    )
+    if not expected_active:
+        under_evaluated_active_pairs = {
+            pid: len(evals)
+            for pid, evals in sorted(active_evaluators_by_pair.items())
+            if len(evals) < min_evaluators
+        }
+
+    is_complete = bool(
+        active_ratings
+        and not missing_active_pairs
+        and not under_evaluated_active_pairs
+        and not missing_control_pairs
+        and not under_evaluated_control_pairs
+        and not unexpected_active_pairs
+    )
+
+    control_summary = {
+        "control_comparisons": len(control_ratings),
+        "control_pairs_rated": len(control_evaluators_by_pair),
+        "control_mos_a": (
+            round(sum(r["score_a"] for r in control_ratings) / len(control_ratings), 4)
+            if control_ratings
+            else None
+        ),
+        "control_mos_b": (
+            round(sum(r["score_b"] for r in control_ratings) / len(control_ratings), 4)
+            if control_ratings
+            else None
+        ),
+        "control_identical_rating_count": sum(
+            1 for r in control_ratings if r["score_a"] == r["score_b"]
+        ),
+    }
+
+    if not active_ratings and not control_ratings:
         return {
             "status": "PENDING_HUMAN_EVALUATION",
+            "is_complete": False,
+            "active_pairs_expected": len(expected_active),
+            "active_pairs_rated": 0,
             "active_comparisons": 0,
-            "control_comparisons": len(control_ratings),
+            "control_comparisons": 0,
+            "control_summary": control_summary,
+            "missing_active_pairs": missing_active_pairs,
+            "under_evaluated_active_pairs": under_evaluated_active_pairs,
+            "missing_control_pairs": missing_control_pairs,
+            "under_evaluated_control_pairs": under_evaluated_control_pairs,
             "mos_a": None,
             "mos_b": None,
             "delta_mos": None,
@@ -192,6 +337,7 @@ def score_blinded_evaluations(
             "b_mos1_count": 0,
             "disagreements": [],
             "gate_checks": {
+                "completeness_ok": False,
                 "delta_mos_ge_minus_0_10": None,
                 "standard_win_rate_ge_0_65": None,
                 "non_loss_rate_ge_0_85": None,
@@ -204,17 +350,16 @@ def score_blinded_evaluations(
     ties = sum(1 for r in active_ratings if r["score_b"] == r["score_a"])
     losses = sum(1 for r in active_ratings if r["score_b"] < r["score_a"])
 
-    mos_a = round(sum(r["score_a"] for r in active_ratings) / total, 4)
-    mos_b = round(sum(r["score_b"] for r in active_ratings) / total, 4)
-    delta_mos = round(mos_b - mos_a, 4)
-    standard_win_rate = round(wins / total, 4)
-    non_loss_rate = round((wins + ties) / total, 4)
+    mos_a = round(sum(r["score_a"] for r in active_ratings) / total, 4) if total else None
+    mos_b = round(sum(r["score_b"] for r in active_ratings) / total, 4) if total else None
+    delta_mos = round(mos_b - mos_a, 4) if (mos_a is not None and mos_b is not None) else None
+    standard_win_rate = round(wins / total, 4) if total else None
+    non_loss_rate = round((wins + ties) / total, 4) if total else None
     b_mos1_count = sum(1 for r in active_ratings if r["score_b"] == 1)
 
     by_pair: Dict[str, List[Dict[str, Any]]] = {}
     for r in active_ratings:
-        key = r["test_id"] or r["pair_label"]
-        by_pair.setdefault(key, []).append(r)
+        by_pair.setdefault(r["test_id"], []).append(r)
 
     disagreements: List[Dict[str, Any]] = []
     for key, pair_rows in sorted(by_pair.items()):
@@ -228,17 +373,33 @@ def score_blinded_evaluations(
             })
 
     gate_checks = {
-        "delta_mos_ge_minus_0_10": delta_mos >= -0.10,
-        "standard_win_rate_ge_0_65": standard_win_rate >= 0.65,
-        "non_loss_rate_ge_0_85": non_loss_rate >= 0.85,
-        "zero_b_mos1": b_mos1_count == 0,
+        "completeness_ok": is_complete,
+        "delta_mos_ge_minus_0_10": (delta_mos >= -0.10) if delta_mos is not None else None,
+        "standard_win_rate_ge_0_65": (standard_win_rate >= 0.65) if standard_win_rate is not None else None,
+        "non_loss_rate_ge_0_85": (non_loss_rate >= 0.85) if non_loss_rate is not None else None,
+        "zero_b_mos1": (b_mos1_count == 0) if total else None,
     }
-    all_passed = all(gate_checks.values())
+
+    if not is_complete:
+        status = "INCOMPLETE_EVALUATION"
+    elif all(bool(v) for v in gate_checks.values()):
+        status = "PASSED"
+    else:
+        status = "FAILED"
 
     return {
-        "status": "PASSED" if all_passed else "FAILED",
+        "status": status,
+        "is_complete": is_complete,
+        "active_pairs_expected": len(expected_active),
+        "active_pairs_rated": len(active_evaluators_by_pair),
         "active_comparisons": total,
         "control_comparisons": len(control_ratings),
+        "control_summary": control_summary,
+        "missing_active_pairs": missing_active_pairs,
+        "under_evaluated_active_pairs": under_evaluated_active_pairs,
+        "missing_control_pairs": missing_control_pairs,
+        "under_evaluated_control_pairs": under_evaluated_control_pairs,
+        "unexpected_active_pairs": unexpected_active_pairs,
         "mos_a": mos_a,
         "mos_b": mos_b,
         "delta_mos": delta_mos,
@@ -540,7 +701,138 @@ class ABTestingHarness:
         return summary
 
     @staticmethod
-    def score_csv(csv_path: Path, mapping_path: Optional[Path] = None) -> Dict[str, Any]:
+    def create_blind_evaluator_package(
+        source_dir: Path,
+        pack_dir: Path,
+        key_output_path: Path,
+        num_evaluators: int = MIN_INDEPENDENT_EVALUATORS,
+        blind_rng: Optional[random.Random] = None,
+    ) -> Dict[str, Any]:
+        """Build a strictly anonymous evaluator pack with fresh cryptographic shuffling/blinding.
+
+        The evaluator pack omits test IDs, raw/normalized text, control flags, model metadata,
+        and mapping secrets; the coordinator key is written separately to ``key_output_path``.
+        """
+        manifest_path = source_dir / "ab_manifest.jsonl"
+        manifest_records = [
+            json.loads(line)
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        rng = blind_rng or secrets.SystemRandom()
+        shuffled = list(manifest_records)
+        rng.shuffle(shuffled)
+
+        audio_dir = pack_dir / "audio"
+        if pack_dir.exists():
+            shutil.rmtree(pack_dir)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        key_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        key_pairs: List[Dict[str, Any]] = []
+        sheet_items: List[Dict[str, str]] = []
+
+        for idx, rec in enumerate(shuffled, start=1):
+            item_id = f"item_{idx:02d}"
+            wav_a = source_dir / rec["wav_a_relpath"]
+            wav_b = source_dir / rec["wav_b_relpath"]
+            stim_1_rel = f"audio/{item_id}_stim_1.wav"
+            stim_2_rel = f"audio/{item_id}_stim_2.wav"
+            stim_1_dst = pack_dir / stim_1_rel
+            stim_2_dst = pack_dir / stim_2_rel
+
+            a_first = bool(rng.randint(0, 1) == 0)
+            if a_first:
+                shutil.copy2(wav_a, stim_1_dst)
+                shutil.copy2(wav_b, stim_2_dst)
+                s1_cond, s2_cond = "A", "B"
+            else:
+                shutil.copy2(wav_b, stim_1_dst)
+                shutil.copy2(wav_a, stim_2_dst)
+                s1_cond, s2_cond = "B", "A"
+
+            nonce = secrets.token_hex(8) if blind_rng is None else f"det_{rng.getrandbits(32):08x}"
+            key_pairs.append({
+                "item_id": item_id,
+                "pair_label": rec["pair_label"],
+                "test_id": rec["test_id"],
+                "is_control": bool(rec.get("is_control", False)),
+                "nonce": nonce,
+                "stimulus_1": s1_cond,
+                "stimulus_2": s2_cond,
+                "stim_1_sha256": compute_file_sha256(stim_1_dst),
+                "stim_2_sha256": compute_file_sha256(stim_2_dst),
+            })
+            sheet_items.append({
+                "item_id": item_id,
+                "stim_1_file": stim_1_rel,
+                "stim_2_file": stim_2_rel,
+            })
+
+        sheet_path = pack_dir / "evaluator_scoring_sheet.csv"
+        fieldnames = [
+            "item_id",
+            "stim_1_file",
+            "stim_2_file",
+            "evaluator_id",
+            "stim_1_score",
+            "stim_2_score",
+            "notes",
+        ]
+        with open(sheet_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for eval_idx in range(1, num_evaluators + 1):
+                for item in sheet_items:
+                    writer.writerow({
+                        **item,
+                        "evaluator_id": f"eval_{eval_idx}",
+                        "stim_1_score": "",
+                        "stim_2_score": "",
+                        "notes": "",
+                    })
+
+        instructions_path = pack_dir / "EVALUATOR_INSTRUCTIONS.md"
+        instructions_path.write_text(
+            "\n".join([
+                "# Istruzioni Valutazione Percettiva Cieca (MOS A/B)",
+                "",
+                "Ascoltare ogni coppia (`stim_1_file` vs `stim_2_file`) in cuffia ad alta fedeltà in ambiente silenzioso.",
+                "Assegnare a ciascuno stimolo un punteggio intero MOS da 1 a 5:",
+                "- **1:** Inaccettabile / grave allucinazione o errore di lettura",
+                "- **2:** Scarso / pronuncia innaturale o interrotta",
+                "- **3:** Accettabile / comprensibile con lievi imperfezioni",
+                "- **4:** Buono / naturale e chiaro",
+                "- **5:** Eccellente / perfettamente naturale e intelligibile",
+                "",
+                "Compilare `evaluator_scoring_sheet.csv` usando valori interi (1-5) nelle colonne `stim_1_score` e `stim_2_score`.",
+                "Non lasciare coppie parzialmente compilate né inserire duplicati per lo stesso valutatore.",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+
+        key_output_path.write_text(
+            json.dumps({"pairs": key_pairs}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return {
+            "pack_dir": str(pack_dir),
+            "sheet_path": str(sheet_path),
+            "instructions_path": str(instructions_path),
+            "items_count": len(sheet_items),
+            "evaluators_expected": num_evaluators,
+            "key_output_path": str(key_output_path),
+        }
+
+    @staticmethod
+    def score_csv(
+        csv_path: Path,
+        mapping_path: Optional[Path] = None,
+        expected_active_ids: Optional[Sequence[str]] = EXPECTED_ACTIVE_AB_IDS,
+        expected_control_ids: Optional[Sequence[str]] = EXPECTED_CONTROL_AB_IDS,
+        min_evaluators: int = MIN_INDEPENDENT_EVALUATORS,
+    ) -> Dict[str, Any]:
         """Load evaluator ratings CSV (and optional secret mapping) and compute A/B metrics."""
         mapping_by_pair: Optional[Dict[str, Dict[str, Any]]] = None
         if mapping_path is not None and mapping_path.exists():
@@ -548,12 +840,22 @@ class ABTestingHarness:
                 data = json.load(f)
             mapping_by_pair = {}
             for entry in data.get("pairs", []):
-                mapping_by_pair[entry["pair_label"]] = entry
-                mapping_by_pair[entry["test_id"]] = entry
+                if "item_id" in entry:
+                    mapping_by_pair[entry["item_id"]] = entry
+                if "pair_label" in entry:
+                    mapping_by_pair[entry["pair_label"]] = entry
+                if "test_id" in entry:
+                    mapping_by_pair[entry["test_id"]] = entry
 
         with open(csv_path, "r", encoding="utf-8", newline="") as f:
             rows = list(csv.DictReader(f))
-        return score_blinded_evaluations(rows, mapping_by_pair=mapping_by_pair)
+        return score_blinded_evaluations(
+            rows,
+            mapping_by_pair=mapping_by_pair,
+            expected_active_ids=expected_active_ids,
+            expected_control_ids=expected_control_ids,
+            min_evaluators=min_evaluators,
+        )
 
 
 def test_identity_normalizer_contract():
@@ -708,6 +1010,9 @@ def test_ab_scoring_formulas_include_ties_and_exclude_control(tmp_path):
     )
 
     result = ABTestingHarness.score_csv(csv_path, mapping_path=mapping_path)
+    # WP6-B1: Partial sample must NEVER return PASSED
+    assert result["status"] == "INCOMPLETE_EVALUATION"
+    assert result["is_complete"] is False
     assert result["active_comparisons"] == 4
     assert result["control_comparisons"] == 1
     assert result["wins"] == 2
@@ -723,4 +1028,124 @@ def test_ab_scoring_formulas_include_ties_and_exclude_control(tmp_path):
     assert result["b_mos1_count"] == 0
     assert len(result["disagreements"]) == 1
     assert result["disagreements"][0]["test_id"] == "M2-AB-001"
+
+
+def test_wp6_b1_strict_scoring_completeness_and_validation_rejections():
+    """WP6-B1: Reject partial approval, <3 evaluators, duplicates, contradictions, non-integers."""
+    def _build_complete_rows():
+        rows = []
+        for idx in range(1, 21):
+            tid = f"M2-AB-{idx:03d}"
+            for ev in ("eval_1", "eval_2", "eval_3"):
+                rows.append({
+                    "test_id": tid,
+                    "is_control": "False",
+                    "evaluator_id": ev,
+                    "score_a": 3,
+                    "score_b": 5 if idx <= 15 else 4,
+                })
+        for ev in ("eval_1", "eval_2", "eval_3"):
+            rows.append({
+                "test_id": "M2-AB-017-CTRL",
+                "is_control": "True",
+                "evaluator_id": ev,
+                "score_a": 4,
+                "score_b": 4,
+            })
+        return rows
+
+    full_res = score_blinded_evaluations(_build_complete_rows())
+    assert full_res["status"] == "PASSED"
+    assert full_res["is_complete"] is True
+    assert full_res["active_comparisons"] == 60
+    assert full_res["control_comparisons"] == 3
+
+    # Missing 20th pair cannot PASS even with 100% win rate on pairs 1..19
+    missing_pair_rows = [r for r in _build_complete_rows() if r["test_id"] != "M2-AB-020"]
+    partial_res = score_blinded_evaluations(missing_pair_rows)
+    assert partial_res["status"] == "INCOMPLETE_EVALUATION"
+    assert partial_res["is_complete"] is False
+    assert "M2-AB-020" in partial_res["missing_active_pairs"]
+
+    # < 3 evaluators on one pair cannot PASS
+    under_eval_rows = [
+        r for r in _build_complete_rows()
+        if not (r["test_id"] == "M2-AB-005" and r["evaluator_id"] == "eval_3")
+    ]
+    under_res = score_blinded_evaluations(under_eval_rows)
+    assert under_res["status"] == "INCOMPLETE_EVALUATION"
+    assert under_res["under_evaluated_active_pairs"]["M2-AB-005"] == 2
+
+    # Missing control pair ratings cannot PASS
+    no_ctrl_rows = [r for r in _build_complete_rows() if r["test_id"] != "M2-AB-017-CTRL"]
+    ctrl_missing_res = score_blinded_evaluations(no_ctrl_rows)
+    assert ctrl_missing_res["status"] == "INCOMPLETE_EVALUATION"
+    assert "M2-AB-017-CTRL" in ctrl_missing_res["missing_control_pairs"]
+
+    # Duplicate / contradictory row rejected
+    dup_rows = _build_complete_rows() + [{
+        "test_id": "M2-AB-001",
+        "is_control": "False",
+        "evaluator_id": "eval_1",
+        "score_a": 4,
+        "score_b": 2,
+    }]
+    with pytest.raises(ValueError, match="Duplicate"):
+        score_blinded_evaluations(dup_rows)
+
+    # Non-integer / out-of-range MOS values rejected
+    for bad_score in ("4.5", "0", "6", "abc", True):
+        bad_rows = [{"test_id": "M2-AB-001", "evaluator_id": "eval_1", "score_a": bad_score, "score_b": 4}]
+        with pytest.raises(ValueError):
+            score_blinded_evaluations(bad_rows)
+
+
+def test_wp6_b2_blind_evaluator_pack_isolation_and_re_blinding(tmp_path):
+    """WP6-B2: Evaluator pack contains zero condition leaks and unblinds cleanly via external key."""
+    manifest_src = REPO_ROOT / "bench" / "ab_audio_m2"
+    if not (manifest_src / "ab_manifest.jsonl").exists():
+        pytest.skip("Real CUDA manifest not present in isolated test run")
+
+    pack_dir = tmp_path / "evaluator_pack"
+    key_path = tmp_path / "private_coordinator" / "key.json"
+    info = ABTestingHarness.create_blind_evaluator_package(
+        source_dir=manifest_src,
+        pack_dir=pack_dir,
+        key_output_path=key_path,
+        blind_rng=random.Random(999),
+    )
+
+    assert info["items_count"] == 21
+    assert key_path.exists()
+    # Key must NEVER reside inside pack_dir
+    assert key_path.resolve().parent != pack_dir.resolve()
+    assert not any("secret" in p.name.lower() or "manifest" in p.name.lower() for p in pack_dir.rglob("*"))
+
+    forbidden_terms = ("M2-AB-", "_A_raw", "_B_norm", "is_control", "raw_text", "normalized_text")
+    for text_file in (pack_dir / "evaluator_scoring_sheet.csv", pack_dir / "EVALUATOR_INSTRUCTIONS.md"):
+        content = text_file.read_text(encoding="utf-8")
+        for term in forbidden_terms:
+            assert term not in content, f"Leaked {term} into {text_file.name}"
+
+    # Verify all 42 opaque audio files exist and unblinded blank sheet stays PENDING_HUMAN_EVALUATION
+    wav_files = list((pack_dir / "audio").glob("*.wav"))
+    assert len(wav_files) == 42
+    blank_eval = ABTestingHarness.score_csv(pack_dir / "evaluator_scoring_sheet.csv", mapping_path=key_path)
+    assert blank_eval["status"] == "PENDING_HUMAN_EVALUATION"
+    assert blank_eval["is_complete"] is False
+
+    # Verify item_01..item_21 scoring resolves cleanly via private coordinator key
+    rows = list(csv.DictReader((pack_dir / "evaluator_scoring_sheet.csv").open("r", encoding="utf-8")))
+    for r in rows:
+        r["stim_1_score"] = "4"
+        r["stim_2_score"] = "4"
+    tie_res = score_blinded_evaluations(
+        rows,
+        mapping_by_pair={e["item_id"]: e for e in json.loads(key_path.read_text(encoding="utf-8"))["pairs"]},
+    )
+    assert tie_res["status"] == "FAILED"  # 100% ties -> Win Rate 0.0 < 0.65 (still complete!)
+    assert tie_res["is_complete"] is True
+    assert tie_res["active_comparisons"] == 60
+    assert tie_res["control_comparisons"] == 3
+
 
