@@ -1,0 +1,34 @@
+{
+  "model_id": "1.7B-Base",
+  "seed": 42,
+  "total_records": 21,
+  "active_pairs": 20,
+  "control_pairs": 1,
+  "active_pairs_all_modified": true,
+  "control_pairs_noop": true,
+  "all_wavs_technically_valid": true,
+  "human_mos_evaluation": {
+    "status": "PENDING_HUMAN_EVALUATION",
+    "active_comparisons": 0,
+    "control_comparisons": 0,
+    "mos_a": null,
+    "mos_b": null,
+    "delta_mos": null,
+    "wins": 0,
+    "ties": 0,
+    "losses": 0,
+    "standard_win_rate": null,
+    "non_loss_rate": null,
+    "b_mos1_count": 0,
+    "disagreements": [],
+    "gate_checks": {
+      "delta_mos_ge_minus_0_10": null,
+      "standard_win_rate_ge_0_65": null,
+      "non_loss_rate_ge_0_85": null,
+      "zero_b_mos1": null
+    }
+  },
+  "manifest_path": "C:\\Users\\occhi\\Desktop\\CASA\\PERSONALE\\PROJECT\\ITA_TTS\\bench\\ab_audio_m2\\ab_manifest.jsonl",
+  "template_csv_path": "C:\\Users\\occhi\\Desktop\\CASA\\PERSONALE\\PROJECT\\ITA_TTS\\bench\\ab_audio_m2\\ab_scoring_template.csv",
+  "mapping_secret_path": "C:\\Users\\occhi\\Desktop\\CASA\\PERSONALE\\PROJECT\\ITA_TTS\\bench\\ab_audio_m2\\blinded_mapping_secret.json"
+}

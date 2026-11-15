@@ -1446,6 +1446,63 @@ def update_char_count(text):
         return f'<span class="char-count">{count:,} / {MAX_CHARS:,} characters</span>'
 
 
+M2_TOGGLE_LABEL = "Abilita normalizzazione italiana (M2)"
+M2_PREVIEW_LABEL = "Anteprima testo normalizzato (M2 Diff)"
+_M2_NORMALIZER_INSTANCE = None
+
+
+def _get_m2_italian_normalizer():
+    """Lazily instantiate ItalianTextNormalizer only when M2 opt-in features are used."""
+    global _M2_NORMALIZER_INSTANCE
+    if _M2_NORMALIZER_INSTANCE is None:
+        from src.linguistics import ItalianTextNormalizer
+
+        _M2_NORMALIZER_INSTANCE = ItalianTextNormalizer()
+    return _M2_NORMALIZER_INSTANCE
+
+
+def _resolve_synthesis_text(text: str, enable_m2_normalization: bool = False) -> str:
+    """Return M2-normalized text only when opt-in toggle is enabled; preserve raw M1 text otherwise."""
+    if not enable_m2_normalization or not text:
+        return text
+    return _get_m2_italian_normalizer().normalize(text).normalized_text
+
+
+def update_m2_diff_preview(text: str, enable_m2_normalization: bool = False) -> str:
+    """Render collapsible pre-synthesis diff preview for M2 normalization toggle."""
+    if not text or not text.strip():
+        return ""
+    if not enable_m2_normalization:
+        return f"[M2 OFF — nessuna normalizzazione applicata al TTS]\nTesto attivo:\n{text}"
+    norm_res = _get_m2_italian_normalizer().normalize(text)
+    n_ann = len(norm_res.annotations)
+    if norm_res.normalized_text == text:
+        return f"[M2 ON — nessuna trasformazione necessaria (testo invariato)]\n{norm_res.normalized_text}"
+    return (
+        f"[M2 ON — {n_ann} trasformazioni applicate]\n"
+        f"Originale:\n{text}\n\n"
+        f"Normalizzato:\n{norm_res.normalized_text}"
+    )
+
+
+def _build_m2_optin_controls():
+    """Create opt-in M2 toggle (disabled by default) and collapsible diff preview panel."""
+    toggle = gr.Checkbox(
+        label=M2_TOGGLE_LABEL,
+        value=False,
+        info="Espande numeri, date, orari, valute, unità, titoli e sigle prima della sintesi (opt-in)",
+    )
+    with gr.Accordion(M2_PREVIEW_LABEL, open=False):
+        diff_box = gr.Textbox(
+            label="Confronto Raw → Normalizzato",
+            interactive=False,
+            lines=3,
+            max_lines=6,
+            placeholder="Inserisci del testo e attiva il toggle M2 per visualizzare la normalizzazione...",
+        )
+    return toggle, diff_box
+
+
 def generate_custom_voice(
     text,
     model_name,
@@ -1460,6 +1517,7 @@ def generate_custom_voice(
     sub_temp,
     sub_top_k,
     sub_top_p,
+    enable_m2_normalization=False,
     progress=gr.Progress(),
 ):
     if not text.strip():
@@ -1481,9 +1539,10 @@ def generate_custom_voice(
         }
     )
 
+    synth_text = _resolve_synthesis_text(text, enable_m2_normalization)
     start_time = time.time()
-    char_count = len(text)
-    auto_max_tokens = estimate_max_tokens(text)
+    char_count = len(synth_text)
+    auto_max_tokens = estimate_max_tokens(synth_text)
     est_time = max(10, char_count * 0.15)
 
     wavs = None
@@ -1512,7 +1571,7 @@ def generate_custom_voice(
         )
 
         gen_res = facade.synthesize(
-            text=text,
+            text=synth_text,
             model_id=model_name,
             mode="custom",
             language=language,
@@ -1529,6 +1588,23 @@ def generate_custom_voice(
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             sf.write(f.name, wavs[0], sr)
 
+            hist_params = {
+                "temperature": temperature,
+                "top_k": int(top_k),
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "max_new_tokens": auto_max_tokens,
+                "subtalker_temperature": sub_temp,
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": sub_top_p,
+                "speaker": speaker,
+                "language": language,
+                "instruct": instruct if instruct and instruct.strip() else None,
+                "m2_normalization": bool(enable_m2_normalization),
+            }
+            if enable_m2_normalization:
+                hist_params["m2_normalized_text"] = synth_text
+
             history_path = save_to_history(
                 f.name,
                 text,
@@ -1536,19 +1612,7 @@ def generate_custom_voice(
                 "preset",
                 gen_time,
                 model_name=model_name,
-                params={
-                    "temperature": temperature,
-                    "top_k": int(top_k),
-                    "top_p": top_p,
-                    "repetition_penalty": repetition_penalty,
-                    "max_new_tokens": auto_max_tokens,
-                    "subtalker_temperature": sub_temp,
-                    "subtalker_top_k": int(sub_top_k),
-                    "subtalker_top_p": sub_top_p,
-                    "speaker": speaker,
-                    "language": language,
-                    "instruct": instruct if instruct and instruct.strip() else None,
-                },
+                params=hist_params,
             )
 
             duration = get_audio_duration(history_path)
@@ -1576,6 +1640,7 @@ def generate_voice_design(
     sub_temp,
     sub_top_k,
     sub_top_p,
+    enable_m2_normalization=False,
     progress=gr.Progress(),
 ):
     if not text.strip():
@@ -1606,9 +1671,10 @@ def generate_voice_design(
         }
     )
 
+    synth_text = _resolve_synthesis_text(text, enable_m2_normalization)
     start_time = time.time()
-    char_count = len(text)
-    auto_max_tokens = estimate_max_tokens(text)
+    char_count = len(synth_text)
+    auto_max_tokens = estimate_max_tokens(synth_text)
     est_time = max(10, char_count * 0.15)
 
     wavs = None
@@ -1635,7 +1701,7 @@ def generate_voice_design(
             actual_language = language if language and language != "auto" else None
 
             gen_kwargs = {
-                "text": text,
+                "text": synth_text,
                 "instruct": voice_description.strip(),
                 "non_streaming_mode": True,
                 "temperature": temperature,
@@ -1666,6 +1732,22 @@ def generate_voice_design(
             sf.write(temp_path, wavs[0], sr)
 
         try:
+            hist_params = {
+                "temperature": temperature,
+                "top_k": int(top_k),
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "max_new_tokens": auto_max_tokens,
+                "subtalker_temperature": sub_temp,
+                "subtalker_top_k": int(sub_top_k),
+                "subtalker_top_p": sub_top_p,
+                "language": actual_language,
+                "voice_description": voice_description.strip(),
+                "m2_normalization": bool(enable_m2_normalization),
+            }
+            if enable_m2_normalization:
+                hist_params["m2_normalized_text"] = synth_text
+
             history_path = save_to_history(
                 temp_path,
                 text,
@@ -1673,18 +1755,7 @@ def generate_voice_design(
                 "design",
                 gen_time,
                 model_name="1.7B-VoiceDesign",
-                params={
-                    "temperature": temperature,
-                    "top_k": int(top_k),
-                    "top_p": top_p,
-                    "repetition_penalty": repetition_penalty,
-                    "max_new_tokens": auto_max_tokens,
-                    "subtalker_temperature": sub_temp,
-                    "subtalker_top_k": int(sub_top_k),
-                    "subtalker_top_p": sub_top_p,
-                    "language": actual_language,
-                    "voice_description": voice_description.strip(),
-                },
+                params=hist_params,
             )
 
             duration = get_audio_duration(history_path)
@@ -1721,6 +1792,7 @@ def clone_voice_multi(
     sub_temp: float,
     sub_top_k: int,
     sub_top_p: float,
+    enable_m2_normalization: bool = False,
     progress=gr.Progress(),
 ):
     if not audio_files:
@@ -1833,8 +1905,9 @@ def clone_voice_multi(
                 if len(test_text) > MAX_CHARS:
                     raise gr.Error(f"Test text too long ({len(test_text)} chars)")
 
-                char_count = len(test_text)
-                auto_max_tokens = estimate_max_tokens(test_text)
+                synth_test_text = _resolve_synthesis_text(test_text, enable_m2_normalization)
+                char_count = len(synth_test_text)
+                auto_max_tokens = estimate_max_tokens(synth_test_text)
                 est_time = max(10, char_count * 0.15)
                 progress(0.4, desc=f"Generating ~{est_time:.0f}s for {char_count} chars...")
 
@@ -1859,7 +1932,7 @@ def clone_voice_multi(
                     raw_prompt_payload=runtime_prompt,
                 )
                 gen_res = facade.synthesize(
-                    text=test_text,
+                    text=synth_test_text,
                     model_id=model_name,
                     mode="clone",
                     language=language,
@@ -1875,6 +1948,24 @@ def clone_voice_multi(
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     sf.write(f.name, wavs[0], sr)
                     n_samples = len(sample_infos) if combine_samples else 1
+                    hist_params = {
+                        "temperature": temperature,
+                        "top_k": int(top_k),
+                        "top_p": top_p,
+                        "repetition_penalty": repetition_penalty,
+                        "max_new_tokens": auto_max_tokens,
+                        "subtalker_temperature": sub_temp,
+                        "subtalker_top_k": int(sub_top_k),
+                        "subtalker_top_p": sub_top_p,
+                        "language": language,
+                        "ref_language": ref_language,
+                        "crosslingual_opt": bool(crosslingual_opt),
+                        "num_samples": n_samples,
+                        "x_vector_only_mode_runtime": runtime_xvector_only,
+                        "m2_normalization": bool(enable_m2_normalization),
+                    }
+                    if enable_m2_normalization:
+                        hist_params["m2_normalized_text"] = synth_test_text
                     output_audio = save_to_history(
                         f.name,
                         test_text,
@@ -1882,21 +1973,7 @@ def clone_voice_multi(
                         "clone",
                         gen_time,
                         model_name=model_name,
-                        params={
-                            "temperature": temperature,
-                            "top_k": int(top_k),
-                            "top_p": top_p,
-                            "repetition_penalty": repetition_penalty,
-                            "max_new_tokens": auto_max_tokens,
-                            "subtalker_temperature": sub_temp,
-                            "subtalker_top_k": int(sub_top_k),
-                            "subtalker_top_p": sub_top_p,
-                            "language": language,
-                            "ref_language": ref_language,
-                            "crosslingual_opt": bool(crosslingual_opt),
-                            "num_samples": n_samples,
-                            "x_vector_only_mode_runtime": runtime_xvector_only,
-                        },
+                        params=hist_params,
                     )
                 duration = get_audio_duration(output_audio)
                 audio_info = (
@@ -2250,6 +2327,7 @@ def generate_with_saved_voice(
     sub_temp,
     sub_top_k,
     sub_top_p,
+    enable_m2_normalization=False,
     progress=gr.Progress(),
 ):
     if not text.strip():
@@ -2273,9 +2351,10 @@ def generate_with_saved_voice(
         }
     )
 
+    synth_text = _resolve_synthesis_text(text, enable_m2_normalization)
     start_time = time.time()
-    char_count = len(text)
-    auto_max_tokens = estimate_max_tokens(text)
+    char_count = len(synth_text)
+    auto_max_tokens = estimate_max_tokens(synth_text)
     est_time = max(10, char_count * 0.15)
     wavs = None
     voice_clone_prompt = None
@@ -2358,7 +2437,7 @@ def generate_with_saved_voice(
             raw_prompt_payload=runtime_prompt,
         )
         gen_res = facade.synthesize(
-            text=text,
+            text=synth_text,
             model_id=model_name,
             mode="clone",
             language=language,
@@ -2393,6 +2472,8 @@ def generate_with_saved_voice(
                     "saved_voice_id": saved_voice_id,
                     "crosslingual_opt": bool(crosslingual_opt),
                     "x_vector_only_mode_runtime": runtime_xvector_only,
+                    "m2_normalization": bool(enable_m2_normalization),
+                    **({"m2_normalized_text": synth_text} if enable_m2_normalization else {}),
                 },
             )
 
@@ -3813,6 +3894,7 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
                                 max_lines=8,
                             )
                             cv_char_count = gr.HTML(value=update_char_count(""))
+                            cv_enable_m2, cv_m2_diff = _build_m2_optin_controls()
 
                             cv_btn = gr.Button(
                                 "Generate Speech",
@@ -3935,6 +4017,7 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
                                 info="Leave empty to just create the voice profile",
                             )
                             vc_test_char_count = gr.HTML(value=update_char_count(""))
+                            vc_enable_m2, vc_m2_diff = _build_m2_optin_controls()
 
                             vc_clone_btn = gr.Button(
                                 "Clone & Generate",
@@ -4022,6 +4105,7 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
                                 max_lines=8,
                             )
                             vd_char_count = gr.HTML(value=update_char_count(""))
+                            vd_enable_m2, vd_m2_diff = _build_m2_optin_controls()
 
                             vd_btn = gr.Button(
                                 "Generate Speech",
@@ -4086,6 +4170,7 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
                                 lines=4,
                             )
                             sv_char_count = gr.HTML(value=update_char_count(""))
+                            sv_enable_m2, sv_m2_diff = _build_m2_optin_controls()
 
                             sv_language = gr.Dropdown(
                                 choices=LANGUAGES, value="auto", label="Language"
@@ -6744,10 +6829,40 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
     ]
 
     cv_text.change(fn=update_char_count, inputs=[cv_text], outputs=[cv_char_count])
+    cv_text.change(
+        fn=update_m2_diff_preview,
+        inputs=[cv_text, cv_enable_m2],
+        outputs=[cv_m2_diff],
+    )
+    cv_enable_m2.change(
+        fn=update_m2_diff_preview,
+        inputs=[cv_text, cv_enable_m2],
+        outputs=[cv_m2_diff],
+    )
     vc_test_text.change(
         fn=update_char_count, inputs=[vc_test_text], outputs=[vc_test_char_count]
     )
+    vc_test_text.change(
+        fn=update_m2_diff_preview,
+        inputs=[vc_test_text, vc_enable_m2],
+        outputs=[vc_m2_diff],
+    )
+    vc_enable_m2.change(
+        fn=update_m2_diff_preview,
+        inputs=[vc_test_text, vc_enable_m2],
+        outputs=[vc_m2_diff],
+    )
     sv_text.change(fn=update_char_count, inputs=[sv_text], outputs=[sv_char_count])
+    sv_text.change(
+        fn=update_m2_diff_preview,
+        inputs=[sv_text, sv_enable_m2],
+        outputs=[sv_m2_diff],
+    )
+    sv_enable_m2.change(
+        fn=update_m2_diff_preview,
+        inputs=[sv_text, sv_enable_m2],
+        outputs=[sv_m2_diff],
+    )
 
     for slider in all_param_sliders:
         slider.change(
@@ -6781,7 +6896,8 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
     ).then(
         fn=generate_custom_voice,
         inputs=[cv_text, cv_model, cv_speaker, cv_language, cv_instruct]
-        + all_param_sliders,
+        + all_param_sliders
+        + [cv_enable_m2],
         outputs=[cv_audio, cv_status],
         concurrency_limit=1,
         concurrency_id="generation",
@@ -6798,6 +6914,16 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
     )
 
     vd_text.change(fn=update_char_count, inputs=[vd_text], outputs=[vd_char_count])
+    vd_text.change(
+        fn=update_m2_diff_preview,
+        inputs=[vd_text, vd_enable_m2],
+        outputs=[vd_m2_diff],
+    )
+    vd_enable_m2.change(
+        fn=update_m2_diff_preview,
+        inputs=[vd_text, vd_enable_m2],
+        outputs=[vd_m2_diff],
+    )
 
     vd_btn.click(
         fn=_disable_btn,
@@ -6806,7 +6932,7 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
         show_progress="hidden",
     ).then(
         fn=generate_voice_design,
-        inputs=[vd_text, vd_description, vd_language] + all_param_sliders,
+        inputs=[vd_text, vd_description, vd_language] + all_param_sliders + [vd_enable_m2],
         outputs=[vd_audio, vd_status],
         concurrency_limit=1,
         concurrency_id="generation",
@@ -6992,7 +7118,8 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
             vc_crosslingual_opt,
             vc_combine_samples,
         ]
-        + all_param_sliders,
+        + all_param_sliders
+        + [vc_enable_m2],
         outputs=[
             vc_output,
             current_prompt_data,
@@ -7098,7 +7225,8 @@ with gr.Blocks(title="Qwen3-TTS Studio", css=custom_css) as demo:
     ).then(
         fn=generate_with_saved_voice,
         inputs=[sv_text, sv_voice_dropdown, sv_language, sv_crosslingual_opt]
-        + all_param_sliders,
+        + all_param_sliders
+        + [sv_enable_m2],
         outputs=[sv_audio, sv_status],
         concurrency_limit=1,
         concurrency_id="generation",
